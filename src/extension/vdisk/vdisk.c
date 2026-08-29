@@ -1,0 +1,706 @@
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <sys/param.h>
+#include <talloc.h>
+#include <errno.h>
+
+#include "extension/extension.h"
+#include "extension/vdisk/vdisk.h"
+#include "cli/note.h"
+#include "path/path.h"
+#include "path/binding.h"
+#include "tracee/tracee.h"
+#include "tracee/reg.h"
+#include "tracee/mem.h"
+#include "syscall/sysnum.h"
+#include "vdisk/block.h"
+#include "vdisk/part.h"
+#include "vdisk/fs.h"
+
+#define MAX_EXCLUSIONS 64
+#define MAX_DISCOVERED_PATHS 256
+
+typedef struct {
+    int ref_count;
+    char image_path[PATH_MAX];
+    int partition_index;
+    vdisk_block_t *root_block_dev;
+    vdisk_block_t *target_block_dev;
+    vdisk_fs_t *fs;
+    char temp_cache_dir[PATH_MAX];
+    char distro_name[64];
+    bool persistent;
+    vdisk_format_t image_format;
+    uint64_t image_size;
+} VdiskConfig;
+
+static char g_vdisk_cache_dir[PATH_MAX] = {0};
+static bool g_vdisk_persistent = false;
+static VdiskConfig *g_active_config = NULL;
+
+static bool g_setup_paths_enabled = true;
+static char g_path_exclusions[MAX_EXCLUSIONS][PATH_MAX];
+static int g_num_exclusions = 0;
+static char g_discovered_path_env[8192] = {0};
+
+const char *vdisk_get_cache_dir(void) {
+    if (g_vdisk_cache_dir[0] != '\0') return g_vdisk_cache_dir;
+    return NULL;
+}
+
+void vdisk_set_persistent(bool persistent) {
+    g_vdisk_persistent = persistent;
+    if (g_active_config) {
+        g_active_config->persistent = persistent;
+    }
+}
+
+void vdisk_set_setup_paths(bool enable) {
+    g_setup_paths_enabled = enable;
+}
+
+void vdisk_add_path_exclusion(const char *exclusion_str) {
+    if (!exclusion_str) return;
+    char copy[PATH_MAX * 4];
+    strncpy(copy, exclusion_str, sizeof(copy) - 1);
+    copy[sizeof(copy) - 1] = '\0';
+
+    char *p = copy;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '[' || *p == ']' || *p == ',' || *p == '"' || *p == '\'') p++;
+        if (!*p) break;
+        char *start = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '[' && *p != ']' && *p != ',' && *p != '"' && *p != '\'') p++;
+        char saved = *p;
+        *p = '\0';
+        if (strlen(start) > 0 && g_num_exclusions < MAX_EXCLUSIONS) {
+            strncpy(g_path_exclusions[g_num_exclusions], start, PATH_MAX - 1);
+            g_path_exclusions[g_num_exclusions][PATH_MAX - 1] = '\0';
+            g_num_exclusions++;
+        }
+        if (saved) p++;
+    }
+}
+
+static void vdisk_discover_and_export_paths(const char *cache_dir);
+
+const char *vdisk_get_discovered_path_env(void) {
+    if (!g_setup_paths_enabled) return NULL;
+    if (g_active_config && g_active_config->temp_cache_dir[0] != '\0') {
+        vdisk_discover_and_export_paths(g_active_config->temp_cache_dir);
+    }
+    if (g_discovered_path_env[0] != '\0') return g_discovered_path_env;
+    return NULL;
+}
+
+static bool is_binary_dir_name(const char *name) {
+    if (!name || name[0] == '\0') return false;
+    if (strcasecmp(name, "bin") == 0 || strcasecmp(name, "sbin") == 0 ||
+        strcasecmp(name, "xbin") == 0 || strcasecmp(name, ".bin") == 0 ||
+        strcasecmp(name, "games") == 0) return true;
+
+    size_t len = strlen(name);
+    if (len >= 3 && strcasecmp(name + len - 3, "bin") == 0) return true;
+    if (len >= 4 && strcasecmp(name + len - 4, "sbin") == 0) return true;
+    if (len >= 4 && strcasecmp(name + len - 4, "xbin") == 0) return true;
+    if (len >= 4 && strcasecmp(name + len - 4, ".bin") == 0) return true;
+    return false;
+}
+
+static bool is_path_excluded(const char *guest_path) {
+    for (int i = 0; i < g_num_exclusions; i++) {
+        const char *ex = g_path_exclusions[i];
+        if (strcmp(ex, "/") == 0) return true;
+        if (strstr(guest_path, ex) != NULL) return true;
+    }
+    return false;
+}
+
+typedef struct {
+    char paths[MAX_DISCOVERED_PATHS][PATH_MAX];
+    int count;
+} DiscoveredPaths;
+
+static void scan_dir_for_bins(const char *host_root, const char *rel_guest, int depth, DiscoveredPaths *out) {
+    if (depth > 5 || out->count >= MAX_DISCOVERED_PATHS) return;
+
+    char host_path[PATH_MAX];
+    if (strcmp(rel_guest, "/") == 0) {
+        snprintf(host_path, sizeof(host_path), "%s", host_root);
+    } else {
+        snprintf(host_path, sizeof(host_path), "%s%s", host_root, rel_guest);
+    }
+
+    DIR *dir = opendir(host_path);
+    if (!dir) return;
+
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+
+        char child_guest[PATH_MAX];
+        if (strcmp(rel_guest, "/") == 0) {
+            snprintf(child_guest, sizeof(child_guest), "/%s", de->d_name);
+        } else {
+            snprintf(child_guest, sizeof(child_guest), "%s/%s", rel_guest, de->d_name);
+        }
+
+        char child_host[PATH_MAX];
+        snprintf(child_host, sizeof(child_host), "%s%s", host_root, child_guest);
+
+        struct stat st;
+        if (stat(child_host, &st) == 0 && S_ISDIR(st.st_mode)) {
+            if (strcmp(child_guest, "/proc") == 0 || strcmp(child_guest, "/sys") == 0 ||
+                strcmp(child_guest, "/dev") == 0 || strcmp(child_guest, "/run") == 0) {
+                continue;
+            }
+
+            if (is_binary_dir_name(de->d_name)) {
+                if (!is_path_excluded(child_guest)) {
+                    bool exists = false;
+                    for (int k = 0; k < out->count; k++) {
+                        if (strcmp(out->paths[k], child_guest) == 0) { exists = true; break; }
+                    }
+                    if (!exists && out->count < MAX_DISCOVERED_PATHS) {
+                        strncpy(out->paths[out->count++], child_guest, PATH_MAX - 1);
+                    }
+                }
+            }
+
+            scan_dir_for_bins(host_root, child_guest, depth + 1, out);
+        }
+    }
+    closedir(dir);
+}
+
+static void vdisk_discover_and_export_paths(const char *cache_dir) {
+    if (!g_setup_paths_enabled) return;
+
+    DiscoveredPaths dp;
+    memset(&dp, 0, sizeof(dp));
+
+    const char *priority_bins[] = {
+        "/usr/local/sbin",
+        "/usr/local/bin",
+        "/usr/sbin",
+        "/usr/bin",
+        "/sbin",
+        "/bin",
+        "/system/bin",
+        "/system/xbin",
+        NULL
+    };
+
+    for (int p = 0; priority_bins[p] != NULL; p++) {
+        if (!is_path_excluded(priority_bins[p])) {
+            char check_host[PATH_MAX];
+            snprintf(check_host, sizeof(check_host), "%s%s", cache_dir, priority_bins[p]);
+            struct stat st;
+            if (stat(check_host, &st) == 0 && S_ISDIR(st.st_mode)) {
+                strncpy(dp.paths[dp.count++], priority_bins[p], PATH_MAX - 1);
+            }
+        }
+    }
+
+    scan_dir_for_bins(cache_dir, "/", 0, &dp);
+
+    g_discovered_path_env[0] = '\0';
+    for (int i = 0; i < dp.count; i++) {
+        if (i > 0) {
+            strncat(g_discovered_path_env, ":", sizeof(g_discovered_path_env) - strlen(g_discovered_path_env) - 1);
+        }
+        strncat(g_discovered_path_env, dp.paths[i], sizeof(g_discovered_path_env) - strlen(g_discovered_path_env) - 1);
+    }
+
+    if (g_discovered_path_env[0] == '\0') {
+        strncpy(g_discovered_path_env, "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", sizeof(g_discovered_path_env) - 1);
+    }
+
+    setenv("PATH", g_discovered_path_env, 1);
+
+    char prof_dir[PATH_MAX];
+    snprintf(prof_dir, sizeof(prof_dir), "%s/etc/profile.d", cache_dir);
+    mkdir(prof_dir, 0755);
+
+    char prof_file[PATH_MAX];
+    snprintf(prof_file, sizeof(prof_file), "%s/00-vdisk-paths.sh", prof_dir);
+    int fd = open(prof_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        char content[8192 + 32];
+        int clen = snprintf(content, sizeof(content), "export PATH=\"%s:$PATH\"\n", g_discovered_path_env);
+        (void)write(fd, content, clen);
+        close(fd);
+    }
+}
+
+static FilteredSysnum vdisk_filtered_sysnums[] = {
+    { PR_uname,        FILTER_SYSEXIT },
+    { PR_olduname,     FILTER_SYSEXIT },
+    { PR_oldolduname,  FILTER_SYSEXIT },
+    { PR_sethostname,  FILTER_SYSEXIT },
+    FILTERED_SYSNUM_END,
+};
+
+static void detect_distro_codename(vdisk_fs_t *fs, char *out_codename, size_t max_len) {
+    strncpy(out_codename, "vdisk", max_len - 1);
+    out_codename[max_len - 1] = '\0';
+
+    vdisk_file_t *file = NULL;
+    const char *os_release_paths[] = { "/usr/lib/os-release", "/etc/os-release", "/etc/issue", NULL };
+    for (int p = 0; os_release_paths[p] != NULL; p++) {
+        if (vdisk_fs_open(fs, os_release_paths[p], O_RDONLY, &file) == VDISK_OK && file) {
+            char buf[4096];
+            int64_t rd = vdisk_file_read(file, buf, sizeof(buf) - 1);
+            vdisk_file_close(file);
+            file = NULL;
+            if (rd > 0) {
+                buf[rd] = '\0';
+                const char *keys[] = { "UBUNTU_CODENAME=", "VERSION_CODENAME=", "ID=", "DEFAULT_HOSTNAME=", NULL };
+                for (int k = 0; keys[k] != NULL; k++) {
+                    char *line = strstr(buf, keys[k]);
+                    if (line) {
+                        char *eq = strchr(line, '=');
+                        if (eq) {
+                            eq++;
+                            while (*eq == ' ' || *eq == '\t') eq++;
+                            if (*eq == '"' || *eq == '\'') eq++;
+                            char *end = eq;
+                            while (*end && *end != '\n' && *end != '\r' && *end != '"' && *end != '\'') end++;
+                            size_t len = end - eq;
+                            if (len > 0 && len < max_len) {
+                                strncpy(out_codename, eq, len);
+                                out_codename[len] = '\0';
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (vdisk_fs_open(fs, "/etc/hostname", O_RDONLY, &file) == VDISK_OK && file) {
+        char buf[256];
+        int64_t rd = vdisk_file_read(file, buf, sizeof(buf) - 1);
+        vdisk_file_close(file);
+        if (rd > 0) {
+            buf[rd] = '\0';
+            char *end = buf;
+            while (*end && *end != '\n' && *end != '\r' && *end != ' ') end++;
+            *end = '\0';
+            if (strlen(buf) > 0) {
+                strncpy(out_codename, buf, max_len - 1);
+                out_codename[max_len - 1] = '\0';
+                return;
+            }
+        }
+    }
+}
+
+static void ensure_parent_dirs(const char *path) {
+    char parent[PATH_MAX];
+    strncpy(parent, path, sizeof(parent) - 1);
+    parent[sizeof(parent) - 1] = '\0';
+    char *slash = strrchr(parent, '/');
+    if (slash && slash != parent) {
+        *slash = '\0';
+        char cmd[PATH_MAX + 16];
+        snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", parent);
+        (void)system(cmd);
+    }
+}
+
+static int extract_vdisk_entry(vdisk_fs_t *fs, const char *guest_path, const char *host_path, int depth);
+
+static int extract_vdisk_file_to_host(vdisk_fs_t *fs, const char *guest_path, const char *host_path) {
+    vdisk_stat_t vs;
+    vdisk_status_t st = vdisk_fs_stat(fs, guest_path, &vs);
+    if (st != VDISK_OK) return -ENOENT;
+
+    ensure_parent_dirs(host_path);
+
+    if (vs.type == VDISK_FILE_DIRECTORY) {
+        mkdir(host_path, 0755);
+        return 0;
+    }
+
+    if (vs.type == VDISK_FILE_SYMLINK) {
+        char link_target[PATH_MAX];
+        memset(link_target, 0, sizeof(link_target));
+        if (fs->ops && fs->ops->read_link) {
+            if (fs->ops->read_link(fs, guest_path, link_target, sizeof(link_target)) == VDISK_OK) {
+                unlink(host_path);
+                symlink(link_target, host_path);
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    vdisk_file_t *file = NULL;
+    st = vdisk_fs_open(fs, guest_path, O_RDONLY, &file);
+    if (st != VDISK_OK) return -ENOENT;
+
+    mode_t out_mode = (vs.mode & 0777) ? (vs.mode & 0777) : 0755;
+    int out_fd = open(host_path, O_WRONLY | O_CREAT | O_TRUNC, out_mode);
+    if (out_fd < 0) {
+        vdisk_file_close(file);
+        return -errno;
+    }
+
+    char buf[65536];
+    int64_t rd;
+    while ((rd = vdisk_file_read(file, buf, sizeof(buf))) > 0) {
+        if (write(out_fd, buf, (size_t)rd) != rd) {
+            close(out_fd);
+            vdisk_file_close(file);
+            return -EIO;
+        }
+    }
+
+    close(out_fd);
+    vdisk_file_close(file);
+    chmod(host_path, out_mode);
+    return 0;
+}
+
+static int extract_vdisk_dir(vdisk_fs_t *fs, const char *guest_dir, const char *host_dir, int depth) {
+    if (depth > 32) return 0;
+
+    ensure_parent_dirs(host_dir);
+    mkdir(host_dir, 0755);
+
+    vdisk_dir_t *dir = NULL;
+    if (vdisk_fs_opendir(fs, guest_dir, &dir) != VDISK_OK || !dir) {
+        return -ENOENT;
+    }
+
+    vdisk_dirent_t dent;
+    while (vdisk_dir_read(dir, &dent) == VDISK_OK) {
+        if (strcmp(dent.name, ".") == 0 || strcmp(dent.name, "..") == 0) continue;
+
+        char child_guest[PATH_MAX];
+        char child_host[PATH_MAX];
+        if (strcmp(guest_dir, "/") == 0) {
+            snprintf(child_guest, sizeof(child_guest), "/%s", dent.name);
+        } else {
+            snprintf(child_guest, sizeof(child_guest), "%s/%s", guest_dir, dent.name);
+        }
+        snprintf(child_host, sizeof(child_host), "%s/%s", host_dir, dent.name);
+
+        extract_vdisk_entry(fs, child_guest, child_host, depth + 1);
+    }
+
+    vdisk_dir_close(dir);
+    return 0;
+}
+
+static int extract_vdisk_entry(vdisk_fs_t *fs, const char *guest_path, const char *host_path, int depth) {
+    vdisk_stat_t vs;
+    if (vdisk_fs_stat(fs, guest_path, &vs) != VDISK_OK) return -ENOENT;
+
+    if (vs.type == VDISK_FILE_DIRECTORY) {
+        return extract_vdisk_dir(fs, guest_path, host_path, depth);
+    } else {
+        return extract_vdisk_file_to_host(fs, guest_path, host_path);
+    }
+}
+
+static void vdisk_do_commit_and_cleanup(VdiskConfig *config) {
+    if (!config || config->temp_cache_dir[0] == '\0') return;
+
+    if (config->persistent) {
+        note(NULL, INFO, USER, "vdisk: syncing changes back to '%s'...", config->image_path);
+
+        char sub[PATH_MAX];
+        snprintf(sub, sizeof(sub), "rm -rf \"%s/tmp/\"* \"%s/run/\"* \"%s/proc/\"* \"%s/sys/\"* \"%s/dev/\"* 2>/dev/null",
+                 config->temp_cache_dir, config->temp_cache_dir, config->temp_cache_dir, config->temp_cache_dir, config->temp_cache_dir);
+        (void)system(sub);
+        snprintf(sub, sizeof(sub), "chmod -R u+rwX \"%s\" 2>/dev/null", config->temp_cache_dir);
+        (void)system(sub);
+
+        uint64_t total_size = config->image_size;
+        if (total_size < 64 * 1024 * 1024) total_size = 64 * 1024 * 1024;
+        vdisk_format_t fmt = config->image_format;
+        char img_copy[PATH_MAX];
+        strncpy(img_copy, config->image_path, sizeof(img_copy) - 1);
+        img_copy[sizeof(img_copy) - 1] = '\0';
+
+        if (config->fs) { vdisk_fs_unmount(config->fs); config->fs = NULL; }
+        if (config->target_block_dev && config->target_block_dev != config->root_block_dev) {
+            vdisk_block_close(config->target_block_dev);
+            config->target_block_dev = NULL;
+        }
+        if (config->root_block_dev) {
+            vdisk_block_close(config->root_block_dev);
+            config->root_block_dev = NULL;
+        }
+
+        char raw_tmp[PATH_MAX];
+        snprintf(raw_tmp, sizeof(raw_tmp), "/tmp/proot_commit_%d.raw", getpid());
+
+        char cmd[PATH_MAX * 3 + 128];
+        snprintf(cmd, sizeof(cmd), "truncate -s %lu \"%s\" && /sbin/mkfs.ext4 -F -d \"%s\" \"%s\" >/dev/null 2>&1",
+                 (unsigned long)total_size, raw_tmp, config->temp_cache_dir, raw_tmp);
+        int ret = system(cmd);
+
+        if (ret == 0) {
+            if (fmt == VDISK_FMT_QCOW2) {
+                snprintf(cmd, sizeof(cmd), "python3 /home/shado/Documents/libdsk_api/tools/raw_to_qcow2.py \"%s\" \"%s\" >/dev/null 2>&1", raw_tmp, img_copy);
+                (void)system(cmd);
+            } else if (fmt == VDISK_FMT_VHD) {
+                snprintf(cmd, sizeof(cmd), "python3 /home/shado/Documents/libdsk_api/tools/raw_to_vhd.py \"%s\" \"%s\" >/dev/null 2>&1", raw_tmp, img_copy);
+                (void)system(cmd);
+            } else {
+                snprintf(cmd, sizeof(cmd), "mv -f \"%s\" \"%s\"", raw_tmp, img_copy);
+                (void)system(cmd);
+            }
+            unlink(raw_tmp);
+            note(NULL, INFO, USER, "vdisk: successfully saved persistent changes to '%s'", img_copy);
+        } else {
+            note(NULL, WARNING, USER, "vdisk: failed to rebuild filesystem image during persistence commit");
+        }
+    } else {
+        if (config->fs) vdisk_fs_unmount(config->fs);
+        if (config->target_block_dev && config->target_block_dev != config->root_block_dev) {
+            vdisk_block_close(config->target_block_dev);
+        }
+        if (config->root_block_dev) vdisk_block_close(config->root_block_dev);
+    }
+
+    if (strlen(config->temp_cache_dir) > 0) {
+        char cmd[PATH_MAX + 16];
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", config->temp_cache_dir);
+        (void)system(cmd);
+        config->temp_cache_dir[0] = '\0';
+    }
+}
+
+static void vdisk_cleanup_atexit(void) {
+    if (g_active_config) {
+        vdisk_do_commit_and_cleanup(g_active_config);
+        g_active_config = NULL;
+    }
+}
+
+int vdisk_callback(Extension *extension, ExtensionEvent event,
+                   intptr_t data1, intptr_t data2)
+{
+    (void)data2;
+    VdiskConfig *config = extension ? (VdiskConfig *)extension->config : NULL;
+
+    switch (event) {
+    case INITIALIZATION: {
+        const char *cli = (const char *)data1;
+        if (!cli || strlen(cli) == 0) {
+            return -EINVAL;
+        }
+
+        config = talloc_zero(extension, VdiskConfig);
+        if (!config) return -ENOMEM;
+        config->ref_count = 1;
+        config->persistent = g_vdisk_persistent;
+        g_active_config = config;
+        extension->config = config;
+
+        atexit(vdisk_cleanup_atexit);
+
+        char img_path[PATH_MAX];
+        strncpy(img_path, cli, sizeof(img_path) - 1);
+        img_path[sizeof(img_path) - 1] = '\0';
+
+        char *colon = strrchr(img_path, ':');
+        if (colon) {
+            *colon = '\0';
+            config->partition_index = atoi(colon + 1);
+        } else {
+            config->partition_index = 0;
+        }
+
+        if (realpath(img_path, config->image_path) == NULL) {
+            strncpy(config->image_path, img_path, sizeof(config->image_path) - 1);
+        }
+
+        vdisk_status_t st = vdisk_block_open_file(config->image_path, true, VDISK_FMT_AUTO, &config->root_block_dev);
+        if (st != VDISK_OK || !config->root_block_dev) {
+            note(NULL, ERROR, USER, "vdisk: failed to open virtual disk image '%s'", config->image_path);
+            return -EINVAL;
+        }
+
+        config->target_block_dev = config->root_block_dev;
+        config->image_format = config->root_block_dev->format;
+        config->image_size = config->root_block_dev->total_sectors * 512;
+
+        vdisk_part_table_t ptable;
+        if (vdisk_part_scan(config->root_block_dev, &ptable) == VDISK_OK && ptable.num_partitions > 0) {
+            int target_p = config->partition_index > 0 ? config->partition_index : 1;
+            if (target_p <= (int)ptable.num_partitions) {
+                const vdisk_partition_t *part = &ptable.partitions[target_p - 1];
+                vdisk_part_open_slice(config->root_block_dev, part, &config->target_block_dev);
+                config->image_size = part->size_bytes;
+            }
+        }
+
+        st = vdisk_fs_detect_and_mount(config->target_block_dev, &config->fs);
+        if (st != VDISK_OK || !config->fs) {
+            note(NULL, ERROR, USER, "vdisk: no valid ext4/FAT filesystem detected in '%s'", config->image_path);
+            return -EINVAL;
+        }
+
+        detect_distro_codename(config->fs, config->distro_name, sizeof(config->distro_name));
+
+        snprintf(config->temp_cache_dir, sizeof(config->temp_cache_dir), "/tmp/proot_vdisk_%d", getpid());
+        strncpy(g_vdisk_cache_dir, config->temp_cache_dir, sizeof(g_vdisk_cache_dir) - 1);
+        mkdir(config->temp_cache_dir, 0755);
+
+        /* Pre-extract full root filesystem to ensure 100% data and package integrity */
+        extract_vdisk_dir(config->fs, "/", config->temp_cache_dir, 0);
+
+        /* Ensure essential directories exist */
+        char sub[PATH_MAX];
+        snprintf(sub, sizeof(sub), "%s/tmp", config->temp_cache_dir); mkdir(sub, 0777);
+        snprintf(sub, sizeof(sub), "%s/dev", config->temp_cache_dir); mkdir(sub, 0755);
+        snprintf(sub, sizeof(sub), "%s/proc", config->temp_cache_dir); mkdir(sub, 0755);
+        snprintf(sub, sizeof(sub), "%s/sys", config->temp_cache_dir); mkdir(sub, 0755);
+        snprintf(sub, sizeof(sub), "%s/root", config->temp_cache_dir); mkdir(sub, 0750);
+        snprintf(sub, sizeof(sub), "%s/var/lib/apt/lists/partial", config->temp_cache_dir); 
+        ensure_parent_dirs(sub); mkdir(sub, 0755);
+        snprintf(sub, sizeof(sub), "%s/var/cache/apt/archives/partial", config->temp_cache_dir);
+        ensure_parent_dirs(sub); mkdir(sub, 0755);
+
+        snprintf(sub, sizeof(sub), "%s/etc/hostname", config->temp_cache_dir);
+        int hfd = open(sub, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (hfd >= 0) {
+            char hbuf[128];
+            int hlen = snprintf(hbuf, sizeof(hbuf), "%s\n", config->distro_name);
+            (void)write(hfd, hbuf, hlen);
+            close(hfd);
+        }
+
+        snprintf(sub, sizeof(sub), "%s/etc/resolv.conf", config->temp_cache_dir);
+        struct stat st_res;
+        if (stat(sub, &st_res) < 0 && stat("/etc/resolv.conf", &st_res) == 0) {
+            char cmd[PATH_MAX + 64];
+            snprintf(cmd, sizeof(cmd), "cp /etc/resolv.conf \"%s\"", sub);
+            (void)system(cmd);
+        }
+
+        /* Ensure terminfo exists so nano/curses work across all distros */
+        snprintf(sub, sizeof(sub), "%s/usr/share/terminfo", config->temp_cache_dir);
+        struct stat st_ti;
+        if (stat(sub, &st_ti) < 0 && stat("/usr/share/terminfo", &st_ti) == 0) {
+            ensure_parent_dirs(sub);
+            char cmd[PATH_MAX * 2 + 64];
+            snprintf(cmd, sizeof(cmd), "cp -rn /usr/share/terminfo \"%s/usr/share/\" 2>/dev/null", config->temp_cache_dir);
+            (void)system(cmd);
+        }
+
+        /* Discover binary directories and export PATH */
+        vdisk_discover_and_export_paths(config->temp_cache_dir);
+
+        extension->filtered_sysnums = vdisk_filtered_sysnums;
+
+        const char *fmt_str = (config->root_block_dev->format == VDISK_FMT_QCOW2) ? "QCOW2" :
+                              (config->root_block_dev->format == VDISK_FMT_VHD) ? "VHD" : "RAW";
+        note(NULL, INFO, USER, "vdisk: successfully mounted '%s' [%s, %.2f MB] (distro: %s%s)",
+             config->image_path, fmt_str, (double)(config->root_block_dev->total_sectors * 512) / (1024.0 * 1024.0),
+             config->distro_name, config->persistent ? ", persistent" : "");
+        return 0;
+    }
+
+    case INHERIT_PARENT: {
+        if (config) {
+            config->ref_count++;
+        }
+        return 0;
+    }
+
+    case TRANSLATED_PATH: {
+        if (!config || !config->fs) return 0;
+        char *host_path = (char *)data1;
+        if (!host_path) return 0;
+
+        size_t cache_len = strlen(config->temp_cache_dir);
+        if (strncmp(host_path, config->temp_cache_dir, cache_len) == 0) {
+            const char *guest_path = host_path + cache_len;
+            if (strlen(guest_path) == 0) guest_path = "/";
+
+            struct stat st;
+            if (lstat(host_path, &st) < 0) {
+                if (extract_vdisk_file_to_host(config->fs, guest_path, host_path) < 0) {
+                    ensure_parent_dirs(host_path);
+                }
+            }
+        }
+        return 0;
+    }
+
+    case SYSCALL_EXIT_END: {
+        if (!config) return 0;
+        Tracee *tracee = TRACEE(extension);
+        word_t sysnum = get_sysnum(tracee, ORIGINAL);
+
+        switch (sysnum) {
+        case PR_uname:
+        case PR_olduname:
+        case PR_oldolduname: {
+            word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+            if (result == 0) {
+                word_t buf_addr = peek_reg(tracee, ORIGINAL, SYSARG_1);
+                write_data(tracee, buf_addr + 65, config->distro_name, strlen(config->distro_name) + 1);
+            }
+            return 0;
+        }
+
+        case PR_sethostname: {
+            poke_reg(tracee, SYSARG_RESULT, 0);
+            return 0;
+        }
+
+        default:
+            return 0;
+        }
+    }
+
+    case REMOVED: {
+        return 0;
+    }
+
+    case PRINT_USAGE: {
+        printf("  --vdisk=<image_path>[:part#]\n"
+               "  --disk=<image_path>[:part#]\n"
+               "                        Boot / execute directly from a QCOW2, VHD, or RAW\n"
+               "                        virtual drive without root, mount, or chroot.\n"
+               "  --persistent, --commit\n"
+               "                        Persist and sync all guest changes back to the virtual\n"
+               "                        disk image on exit.\n"
+               "  --setup-paths, --setup-path\n"
+               "                        Auto-scan and export binary directories (bin, sbin, xbin, .bin)\n"
+               "                        to PATH.\n"
+               "  -se, --setup-exclude, --exclude-path=<list>\n"
+               "                        Exclude directory paths from the auto-scanned PATH list.\n");
+        return 0;
+    }
+
+    case PRINT_CONFIG: {
+        if (config) {
+            printf("vdisk image: %s (partition: %d, distro: %s, persistent: %s, PATH: %s)\n",
+                   config->image_path, config->partition_index, config->distro_name,
+                   config->persistent ? "yes" : "no",
+                   g_discovered_path_env[0] ? g_discovered_path_env : "default");
+        }
+        return 0;
+    }
+
+    default:
+        return 0;
+    }
+}
