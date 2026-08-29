@@ -38,16 +38,14 @@ typedef unsigned char byte_t;
 #define OFFSETOF_STATX_UID 20
 #define OFFSETOF_STATX_GID 24
 
-#if !defined(ARCH_X86_64) && !defined(ARCH_ARM_EABI) && !defined(ARCH_X86) && !defined(ARCH_SH4)
-#    if defined(__x86_64__)
+#if !defined(ARCH_X86_64) && !defined(ARCH_ARM_EABI) && !defined(ARCH_X86) && !defined(ARCH_SH4) && !defined(ARCH_ARM64)
+#    if defined(__x86_64__) || defined(_M_X64)
 #        define ARCH_X86_64 1
-#    elif defined(__ARM_EABI__)
-#        define ARCH_ARM_EABI 1
-#    elif defined(__aarch64__)
+#    elif defined(__aarch64__) || defined(_M_ARM64)
 #        define ARCH_ARM64 1
-#    elif defined(__arm__)
-#        error "Only EABI is currently supported for ARM"
-#    elif defined(__i386__)
+#    elif defined(__ARM_EABI__) || defined(__arm__) || defined(__thumb__) || defined(_M_ARM)
+#        define ARCH_ARM_EABI 1
+#    elif defined(__i386__) || defined(_M_IX86)
 #        define ARCH_X86 1
 #    elif defined(__SH4__)
 #        define ARCH_SH4 1

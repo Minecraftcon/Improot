@@ -530,8 +530,16 @@ static void vdisk_do_commit_and_cleanup(VdiskConfig *config) {
             config->root_block_dev = NULL;
         }
 
+        const char *tmp_base = getenv("TMPDIR");
+        if (!tmp_base || tmp_base[0] == '\0') {
+#if defined(__ANDROID__)
+            tmp_base = "/data/local/tmp";
+#else
+            tmp_base = "/tmp";
+#endif
+        }
         char raw_tmp[PATH_MAX];
-        snprintf(raw_tmp, sizeof(raw_tmp), "/tmp/proot_commit_%d.raw", getpid());
+        snprintf(raw_tmp, sizeof(raw_tmp), "%s/proot_commit_%d.raw", tmp_base, getpid());
 
         char cmd[PATH_MAX * 3 + 128];
         snprintf(cmd, sizeof(cmd), "truncate -s %lu \"%s\" && /sbin/mkfs.ext4 -F -d \"%s\" \"%s\" >/dev/null 2>&1",
@@ -651,7 +659,15 @@ int vdisk_callback(Extension *extension, ExtensionEvent event,
 
         detect_distro_codename(config->fs, config->distro_name, sizeof(config->distro_name));
 
-        snprintf(config->temp_cache_dir, sizeof(config->temp_cache_dir), "/tmp/proot_vdisk_%d", getpid());
+        const char *tmp_base = getenv("TMPDIR");
+        if (!tmp_base || tmp_base[0] == '\0') {
+#if defined(__ANDROID__)
+            tmp_base = "/data/local/tmp";
+#else
+            tmp_base = "/tmp";
+#endif
+        }
+        snprintf(config->temp_cache_dir, sizeof(config->temp_cache_dir), "%s/proot_vdisk_%d", tmp_base, getpid());
         strncpy(g_vdisk_cache_dir, config->temp_cache_dir, sizeof(g_vdisk_cache_dir) - 1);
         mkdir(config->temp_cache_dir, 0755);
 
@@ -660,10 +676,7 @@ int vdisk_callback(Extension *extension, ExtensionEvent event,
          *   1. Shallow-stub the root to expose top-level dirs/symlinks.
          *   2. Fully extract only the critical binary and library directories
          *      that the dynamic linker and shell MUST see before exec().
-         *   3. Everything else is extracted on-demand via TRANSLATED_PATH.
-         *
-         * This reduces boot cost from O(all inodes) → O(small fixed set),
-         * dropping startup time from ~4s to < 80ms on a 64 MB Alpine VHD.
+         *   3. Everything else is extracted on-demand via HOST_PATH / TRANSLATED_PATH.
          */
         extract_vdisk_dir_shallow(config->fs, "/", config->temp_cache_dir);
 
@@ -674,9 +687,12 @@ int vdisk_callback(Extension *extension, ExtensionEvent event,
         /* Critical dirs: fully extracted so exec() + ld.so work immediately */
         const char *critical_full[] = {
             "/bin", "/sbin",
-            "/lib", "/lib64", "/lib32",
+            "/lib", "/lib64", "/lib32", "/libx32",
+            "/lib/arm-linux-gnueabihf", "/lib/aarch64-linux-gnu", "/lib/x86_64-linux-gnu",
             "/usr/bin", "/usr/sbin",
-            "/usr/lib", "/usr/lib64", "/usr/lib32", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu",
+            "/usr/lib", "/usr/lib64", "/usr/lib32",
+            "/usr/lib/arm-linux-gnueabihf", "/usr/lib/aarch64-linux-gnu",
+            "/usr/lib/x86_64-linux-gnu", "/usr/lib/i386-linux-gnu",
             "/usr/local/bin", "/usr/local/sbin",
             "/etc",
             NULL
@@ -717,23 +733,44 @@ int vdisk_callback(Extension *extension, ExtensionEvent event,
 
         snprintf(sub, sizeof(sub), "%s/etc/resolv.conf", config->temp_cache_dir);
         struct stat st_res;
-        if (stat(sub, &st_res) < 0 && stat("/etc/resolv.conf", &st_res) == 0) {
-            char cmd[PATH_MAX + 64];
-            snprintf(cmd, sizeof(cmd), "cp /etc/resolv.conf \"%s\"", sub);
-            (void)system(cmd);
+        if (stat(sub, &st_res) < 0) {
+            if (stat("/etc/resolv.conf", &st_res) == 0) {
+                char cmd[PATH_MAX + 64];
+                snprintf(cmd, sizeof(cmd), "cp /etc/resolv.conf \"%s\"", sub);
+                (void)system(cmd);
+            } else {
+                /* Android / Termux fallback: write standard public DNS resolvers */
+                ensure_parent_dirs(sub);
+                int rfd = open(sub, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (rfd >= 0) {
+                    const char dns[] = "nameserver 8.8.8.8\nnameserver 1.1.1.1\nnameserver 8.8.4.4\n";
+                    (void)write(rfd, dns, sizeof(dns) - 1);
+                    close(rfd);
+                }
+            }
         }
 
         /* Ensure terminfo exists so nano/curses work across all distros */
         snprintf(sub, sizeof(sub), "%s/usr/share/terminfo", config->temp_cache_dir);
         struct stat st_ti;
-        if (stat(sub, &st_ti) < 0 && stat("/usr/share/terminfo", &st_ti) == 0) {
-            ensure_parent_dirs(sub);
-            char cmd[PATH_MAX * 2 + 64];
-            snprintf(cmd, sizeof(cmd), "cp -rn /usr/share/terminfo \"%s/usr/share/\" 2>/dev/null", config->temp_cache_dir);
-            (void)system(cmd);
+        if (stat(sub, &st_ti) < 0) {
+            const char *src_ti = NULL;
+            if (stat("/usr/share/terminfo", &st_ti) == 0) src_ti = "/usr/share/terminfo";
+            else if (stat("/data/data/com.termux/files/usr/share/terminfo", &st_ti) == 0) src_ti = "/data/data/com.termux/files/usr/share/terminfo";
+            else if (getenv("PREFIX")) {
+                static char pfx_ti[PATH_MAX];
+                snprintf(pfx_ti, sizeof(pfx_ti), "%s/share/terminfo", getenv("PREFIX"));
+                if (stat(pfx_ti, &st_ti) == 0) src_ti = pfx_ti;
+            }
+            if (src_ti) {
+                ensure_parent_dirs(sub);
+                char cmd[PATH_MAX * 2 + 64];
+                snprintf(cmd, sizeof(cmd), "cp -rn \"%s\" \"%s/usr/share/\" 2>/dev/null", src_ti, config->temp_cache_dir);
+                (void)system(cmd);
+            }
         }
 
-        /* Discover binary directories and export PATH */
+        /* Discover binary directories and export PATH if requested */
         vdisk_discover_and_export_paths(config->temp_cache_dir);
 
         extension->filtered_sysnums = vdisk_filtered_sysnums;

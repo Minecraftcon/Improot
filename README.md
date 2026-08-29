@@ -97,13 +97,46 @@ exit
 - `e2fsprogs` (`mkfs.ext4`)
 - `talloc` (`libtalloc-dev`)
 
-### Compile:
+### 1. Native Build (Linux x86_64 / Native Host):
 ```bash
-cd proot/src
-make -j$(nproc)
+./build.sh native
+# Or manually:
+cd src && make -j$(nproc)
 ```
 
-The resulting binary `./proot` (Improot) is completely self-contained!
+### 2. Termux Build (Directly on Android Phone / Tablet):
+```bash
+# Inside Termux app:
+pkg update && pkg install clang make git libtalloc
+git clone https://github.com/Minecraftcon/Improot.git
+git clone https://github.com/Minecraftcon/libvdisk.git
+cd Improot
+./build.sh termux
+```
+
+### 3. Cross-Compile for AArch64 (64-bit ARM / Termux):
+```bash
+# With GNU Cross-Toolchain:
+sudo apt install gcc-aarch64-linux-gnu
+./build.sh aarch64
+
+# Or with Android NDK:
+export ANDROID_NDK_HOME=/opt/android-ndk
+./build.sh android-arm64
+```
+
+### 4. Cross-Compile for ARM32 EABI (Android 9 Era / 32-bit ARM):
+```bash
+# With GNU Cross-Toolchain:
+sudo apt install gcc-arm-linux-gnueabihf
+./build.sh arm32
+
+# Or with Android NDK (API 28 - Android 9.0 Pie):
+export ANDROID_NDK_HOME=/opt/android-ndk
+./build.sh android-arm32
+```
+
+The resulting binary `./src/proot` (Improot) is completely self-contained and linked against `libvdisk.a`!
 
 ---
 
