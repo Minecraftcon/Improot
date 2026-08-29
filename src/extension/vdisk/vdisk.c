@@ -44,7 +44,9 @@ typedef struct {
 
 static char g_vdisk_cache_dir[PATH_MAX] = {0};
 static bool g_vdisk_persistent = false;
+static VdiskConfig g_static_vdisk_config;
 static VdiskConfig *g_active_config = NULL;
+static pid_t g_main_proot_pid = 0;
 
 static bool g_setup_paths_enabled = false;
 static char g_path_exclusions[MAX_EXCLUSIONS][PATH_MAX];
@@ -106,12 +108,6 @@ static bool is_binary_dir_name(const char *name) {
     if (strcasecmp(name, "bin") == 0 || strcasecmp(name, "sbin") == 0 ||
         strcasecmp(name, "xbin") == 0 || strcasecmp(name, ".bin") == 0 ||
         strcasecmp(name, "games") == 0) return true;
-
-    size_t len = strlen(name);
-    if (len >= 3 && strcasecmp(name + len - 3, "bin") == 0) return true;
-    if (len >= 4 && strcasecmp(name + len - 4, "sbin") == 0) return true;
-    if (len >= 4 && strcasecmp(name + len - 4, "xbin") == 0) return true;
-    if (len >= 4 && strcasecmp(name + len - 4, ".bin") == 0) return true;
     return false;
 }
 
@@ -132,34 +128,46 @@ typedef struct {
 static void scan_dir_for_bins(const char *host_root, const char *rel_guest, int depth, DiscoveredPaths *out) {
     if (depth > 5 || out->count >= MAX_DISCOVERED_PATHS) return;
 
-    char host_path[PATH_MAX];
+    char *host_path = (char *)malloc(PATH_MAX);
+    if (!host_path) return;
+
     if (strcmp(rel_guest, "/") == 0) {
-        snprintf(host_path, sizeof(host_path), "%s", host_root);
+        snprintf(host_path, PATH_MAX, "%s", host_root);
     } else {
-        snprintf(host_path, sizeof(host_path), "%s%s", host_root, rel_guest);
+        snprintf(host_path, PATH_MAX, "%s%s", host_root, rel_guest);
     }
 
     DIR *dir = opendir(host_path);
+    free(host_path);
     if (!dir) return;
 
     struct dirent *de;
     while ((de = readdir(dir)) != NULL) {
         if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
 
-        char child_guest[PATH_MAX];
-        if (strcmp(rel_guest, "/") == 0) {
-            snprintf(child_guest, sizeof(child_guest), "/%s", de->d_name);
-        } else {
-            snprintf(child_guest, sizeof(child_guest), "%s/%s", rel_guest, de->d_name);
+        char *child_guest = (char *)malloc(PATH_MAX);
+        char *child_host = (char *)malloc(PATH_MAX);
+        if (!child_guest || !child_host) {
+            free(child_guest);
+            free(child_host);
+            break;
         }
 
-        char child_host[PATH_MAX];
-        snprintf(child_host, sizeof(child_host), "%s%s", host_root, child_guest);
+        if (strcmp(rel_guest, "/") == 0) {
+            snprintf(child_guest, PATH_MAX, "/%s", de->d_name);
+        } else {
+            snprintf(child_guest, PATH_MAX, "%s/%s", rel_guest, de->d_name);
+        }
+        snprintf(child_host, PATH_MAX, "%s%s", host_root, child_guest);
 
         struct stat st;
         if (stat(child_host, &st) == 0 && S_ISDIR(st.st_mode)) {
             if (strcmp(child_guest, "/proc") == 0 || strcmp(child_guest, "/sys") == 0 ||
-                strcmp(child_guest, "/dev") == 0 || strcmp(child_guest, "/run") == 0) {
+                strcmp(child_guest, "/dev") == 0 || strcmp(child_guest, "/run") == 0 ||
+                strcmp(child_guest, "/usr/share") == 0 || strcmp(child_guest, "/var") == 0 ||
+                strcmp(child_guest, "/tmp") == 0) {
+                free(child_guest);
+                free(child_host);
                 continue;
             }
 
@@ -177,6 +185,8 @@ static void scan_dir_for_bins(const char *host_root, const char *rel_guest, int 
 
             scan_dir_for_bins(host_root, child_guest, depth + 1, out);
         }
+        free(child_guest);
+        free(child_host);
     }
     closedir(dir);
 }
@@ -184,8 +194,8 @@ static void scan_dir_for_bins(const char *host_root, const char *rel_guest, int 
 static void vdisk_discover_and_export_paths(const char *cache_dir) {
     if (!g_setup_paths_enabled) return;
 
-    DiscoveredPaths dp;
-    memset(&dp, 0, sizeof(dp));
+    DiscoveredPaths *dp = (DiscoveredPaths *)calloc(1, sizeof(DiscoveredPaths));
+    if (!dp) return;
 
     const char *priority_bins[] = {
         "/usr/local/sbin",
@@ -205,20 +215,27 @@ static void vdisk_discover_and_export_paths(const char *cache_dir) {
             snprintf(check_host, sizeof(check_host), "%s%s", cache_dir, priority_bins[p]);
             struct stat st;
             if (stat(check_host, &st) == 0 && S_ISDIR(st.st_mode)) {
-                strncpy(dp.paths[dp.count++], priority_bins[p], PATH_MAX - 1);
+                strncpy(dp->paths[dp->count++], priority_bins[p], PATH_MAX - 1);
             }
         }
     }
 
-    scan_dir_for_bins(cache_dir, "/", 0, &dp);
+    scan_dir_for_bins(cache_dir, "/", 0, dp);
 
+    size_t cur_len = 0;
     g_discovered_path_env[0] = '\0';
-    for (int i = 0; i < dp.count; i++) {
-        if (i > 0) {
-            strncat(g_discovered_path_env, ":", sizeof(g_discovered_path_env) - strlen(g_discovered_path_env) - 1);
+    for (int i = 0; i < dp->count; i++) {
+        size_t p_len = strlen(dp->paths[i]);
+        if (cur_len + p_len + 2 >= sizeof(g_discovered_path_env)) break;
+        if (cur_len > 0) {
+            g_discovered_path_env[cur_len++] = ':';
+            g_discovered_path_env[cur_len] = '\0';
         }
-        strncat(g_discovered_path_env, dp.paths[i], sizeof(g_discovered_path_env) - strlen(g_discovered_path_env) - 1);
+        memcpy(g_discovered_path_env + cur_len, dp->paths[i], p_len + 1);
+        cur_len += p_len;
     }
+
+    free(dp);
 
     if (g_discovered_path_env[0] == '\0') {
         strncpy(g_discovered_path_env, "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", sizeof(g_discovered_path_env) - 1);
@@ -438,7 +455,7 @@ static int extract_vdisk_dir_shallow(vdisk_fs_t *fs, const char *guest_dir, cons
 static int extract_vdisk_entry(vdisk_fs_t *fs, const char *guest_path, const char *host_path, int depth);
 
 static int extract_vdisk_dir_full(vdisk_fs_t *fs, const char *guest_dir, const char *host_dir, int depth) {
-    if (depth > 32) return 0;
+    if (depth > 20) return 0;
 
     ensure_parent_dirs(host_dir);
     mkdir(host_dir, 0755);
@@ -451,23 +468,33 @@ static int extract_vdisk_dir_full(vdisk_fs_t *fs, const char *guest_dir, const c
     while (vdisk_dir_read(dir, &dent) == VDISK_OK) {
         if (strcmp(dent.name, ".") == 0 || strcmp(dent.name, "..") == 0) continue;
 
-        char child_guest[PATH_MAX];
-        char child_host[PATH_MAX];
+        char *child_guest = (char *)malloc(PATH_MAX);
+        char *child_host = (char *)malloc(PATH_MAX);
+        if (!child_guest || !child_host) {
+            free(child_guest);
+            free(child_host);
+            break;
+        }
+
         if (strcmp(guest_dir, "/") == 0)
-            snprintf(child_guest, sizeof(child_guest), "/%s", dent.name);
+            snprintf(child_guest, PATH_MAX, "/%s", dent.name);
         else
-            snprintf(child_guest, sizeof(child_guest), "%s/%s", guest_dir, dent.name);
-        snprintf(child_host, sizeof(child_host), "%s/%s", host_dir, dent.name);
+            snprintf(child_guest, PATH_MAX, "%s/%s", guest_dir, dent.name);
+        snprintf(child_host, PATH_MAX, "%s/%s", host_dir, dent.name);
 
         struct stat st;
         if (lstat(child_host, &st) == 0) {
             if (!S_ISDIR(st.st_mode)) {
                 /* Existing regular file or symlink — preserve host/modified version */
+                free(child_guest);
+                free(child_host);
                 continue;
             }
         }
 
         extract_vdisk_entry(fs, child_guest, child_host, depth + 1);
+        free(child_guest);
+        free(child_host);
     }
 
     vdisk_dir_close(dir);
@@ -475,22 +502,35 @@ static int extract_vdisk_dir_full(vdisk_fs_t *fs, const char *guest_dir, const c
 }
 
 static int extract_vdisk_entry(vdisk_fs_t *fs, const char *guest_path, const char *host_path, int depth) {
+    if (depth > 20) return 0;
     vdisk_stat_t vs;
     if (vdisk_fs_stat(fs, guest_path, &vs) != VDISK_OK) return -ENOENT;
 
-    if (vs.type == VDISK_FILE_DIRECTORY)
-        return extract_vdisk_dir_full(fs, guest_path, host_path, depth);
-    else
+    if (vs.type == VDISK_FILE_DIRECTORY) {
+        return extract_vdisk_dir_full(fs, guest_path, host_path, depth + 1);
+    } else if (vs.type == VDISK_FILE_SYMLINK) {
+        char link_target[PATH_MAX] = {0};
+        if (fs->ops && fs->ops->read_link &&
+            fs->ops->read_link(fs, guest_path, link_target, sizeof(link_target)) == VDISK_OK) {
+            unlink(host_path);
+            symlink(link_target, host_path);
+            return 0;
+        }
+        return -EINVAL;
+    } else {
         return extract_vdisk_file_to_host(fs, guest_path, host_path);
+    }
 }
 
 static void vdisk_do_commit_and_cleanup(VdiskConfig *config) {
     if (!config || config->temp_cache_dir[0] == '\0') return;
 
     if (config->persistent) {
+        config->persistent = false; /* Prevent double commit */
+
         /* Safety check: do not commit if rootfs is broken or empty */
-        char check_bin[PATH_MAX];
-        char check_usr[PATH_MAX];
+        char check_bin[1024];
+        char check_usr[1024];
         snprintf(check_bin, sizeof(check_bin), "%s/bin", config->temp_cache_dir);
         snprintf(check_usr, sizeof(check_usr), "%s/usr", config->temp_cache_dir);
         struct stat st_b, st_u;
@@ -506,25 +546,47 @@ static void vdisk_do_commit_and_cleanup(VdiskConfig *config) {
             extract_vdisk_dir_full(config->fs, "/", config->temp_cache_dir, 0);
         }
 
-        char sub[PATH_MAX];
-        snprintf(sub, sizeof(sub), "rm -rf \"%s/tmp/\"* \"%s/run/\"* \"%s/proc/\"* \"%s/sys/\"* \"%s/dev/\"* 2>/dev/null",
-                 config->temp_cache_dir, config->temp_cache_dir, config->temp_cache_dir, config->temp_cache_dir, config->temp_cache_dir);
-        (void)system(sub);
-        snprintf(sub, sizeof(sub), "chmod -R u+rwX \"%s\" 2>/dev/null", config->temp_cache_dir);
-        (void)system(sub);
+        char *sub = (char *)malloc(PATH_MAX * 2);
+        if (sub) {
+            snprintf(sub, PATH_MAX * 2, "rm -rf \"%s/tmp/\"* \"%s/run/\"* \"%s/proc/\"* \"%s/sys/\"* \"%s/dev/\"* 2>/dev/null",
+                     config->temp_cache_dir, config->temp_cache_dir, config->temp_cache_dir, config->temp_cache_dir, config->temp_cache_dir);
+            (void)system(sub);
+            snprintf(sub, PATH_MAX * 2, "chmod -R u+rwX \"%s\" 2>/dev/null", config->temp_cache_dir);
+            (void)system(sub);
+            free(sub);
+        }
 
+        uint64_t actual_dir_bytes = 0;
+        char du_cmd[1024];
+        snprintf(du_cmd, sizeof(du_cmd), "du -sb \"%s\" 2>/dev/null", config->temp_cache_dir);
+        FILE *du_fp = popen(du_cmd, "r");
+        if (du_fp) {
+            unsigned long long bytes_read = 0;
+            if (fscanf(du_fp, "%llu", &bytes_read) == 1) {
+                actual_dir_bytes = (uint64_t)bytes_read;
+            }
+            pclose(du_fp);
+        }
+
+        uint64_t required_size = actual_dir_bytes + (actual_dir_bytes / 5) + (32 * 1024 * 1024);
         uint64_t total_size = config->image_size;
+        if (required_size > total_size) {
+            total_size = required_size;
+        }
         if (total_size < 64 * 1024 * 1024) total_size = 64 * 1024 * 1024;
         vdisk_format_t fmt = config->image_format;
         char img_copy[PATH_MAX];
         strncpy(img_copy, config->image_path, sizeof(img_copy) - 1);
         img_copy[sizeof(img_copy) - 1] = '\0';
 
-        if (config->fs) { vdisk_fs_unmount(config->fs); config->fs = NULL; }
+        if (config->fs) { 
+            vdisk_fs_unmount(config->fs); 
+            config->fs = NULL; 
+        }
         if (config->target_block_dev && config->target_block_dev != config->root_block_dev) {
             vdisk_block_close(config->target_block_dev);
-            config->target_block_dev = NULL;
         }
+        config->target_block_dev = NULL;
         if (config->root_block_dev) {
             vdisk_block_close(config->root_block_dev);
             config->root_block_dev = NULL;
@@ -541,26 +603,41 @@ static void vdisk_do_commit_and_cleanup(VdiskConfig *config) {
         char raw_tmp[PATH_MAX];
         snprintf(raw_tmp, sizeof(raw_tmp), "%s/proot_commit_%d.raw", tmp_base, getpid());
 
-        char cmd[PATH_MAX * 3 + 128];
-        snprintf(cmd, sizeof(cmd), "truncate -s %lu \"%s\" && /sbin/mkfs.ext4 -F -d \"%s\" \"%s\" >/dev/null 2>&1",
-                 (unsigned long)total_size, raw_tmp, config->temp_cache_dir, raw_tmp);
-        int ret = system(cmd);
+        char *cmd = (char *)malloc(PATH_MAX * 4);
+        if (cmd) {
+            snprintf(cmd, PATH_MAX * 4, "truncate -s %lu \"%s\" && /sbin/mkfs.ext4 -F -d \"%s\" \"%s\" >/dev/null 2>&1",
+                     (unsigned long)total_size, raw_tmp, config->temp_cache_dir, raw_tmp);
+            int ret = system(cmd);
 
-        if (ret == 0) {
-            if (fmt == VDISK_FMT_QCOW2) {
-                snprintf(cmd, sizeof(cmd), "python3 /home/shado/Documents/libdsk_api/tools/raw_to_qcow2.py \"%s\" \"%s\" >/dev/null 2>&1", raw_tmp, img_copy);
-                (void)system(cmd);
-            } else if (fmt == VDISK_FMT_VHD) {
-                snprintf(cmd, sizeof(cmd), "python3 /home/shado/Documents/libdsk_api/tools/raw_to_vhd.py \"%s\" \"%s\" >/dev/null 2>&1", raw_tmp, img_copy);
-                (void)system(cmd);
+            if (ret == 0) {
+                char vhd_script[PATH_MAX] = "tools/raw_to_vhd.py";
+                char qcow_script[PATH_MAX] = "tools/raw_to_qcow2.py";
+                if (access("tools/raw_to_vhd.py", F_OK) != 0) {
+                    if (access("../tools/raw_to_vhd.py", F_OK) == 0) {
+                        strncpy(vhd_script, "../tools/raw_to_vhd.py", sizeof(vhd_script) - 1);
+                        strncpy(qcow_script, "../tools/raw_to_qcow2.py", sizeof(qcow_script) - 1);
+                    } else if (access("/home/shado/Documents/libdsk_api/tools/raw_to_vhd.py", F_OK) == 0) {
+                        strncpy(vhd_script, "/home/shado/Documents/libdsk_api/tools/raw_to_vhd.py", sizeof(vhd_script) - 1);
+                        strncpy(qcow_script, "/home/shado/Documents/libdsk_api/tools/raw_to_qcow2.py", sizeof(qcow_script) - 1);
+                    }
+                }
+
+                if (fmt == VDISK_FMT_QCOW2) {
+                    snprintf(cmd, PATH_MAX * 4, "python3 \"%s\" \"%s\" \"%s\" >/dev/null 2>&1", qcow_script, raw_tmp, img_copy);
+                    (void)system(cmd);
+                } else if (fmt == VDISK_FMT_VHD) {
+                    snprintf(cmd, PATH_MAX * 4, "python3 \"%s\" \"%s\" \"%s\" >/dev/null 2>&1", vhd_script, raw_tmp, img_copy);
+                    (void)system(cmd);
+                } else {
+                    snprintf(cmd, PATH_MAX * 4, "mv -f \"%s\" \"%s\"", raw_tmp, img_copy);
+                    (void)system(cmd);
+                }
+                unlink(raw_tmp);
+                note(NULL, INFO, USER, "vdisk: successfully saved persistent changes to '%s'", img_copy);
             } else {
-                snprintf(cmd, sizeof(cmd), "mv -f \"%s\" \"%s\"", raw_tmp, img_copy);
-                (void)system(cmd);
+                note(NULL, WARNING, USER, "vdisk: failed to rebuild filesystem image during persistence commit");
             }
-            unlink(raw_tmp);
-            note(NULL, INFO, USER, "vdisk: successfully saved persistent changes to '%s'", img_copy);
-        } else {
-            note(NULL, WARNING, USER, "vdisk: failed to rebuild filesystem image during persistence commit");
+            free(cmd);
         }
     }
 
@@ -571,8 +648,8 @@ cleanup_and_exit:
     }
     if (config->target_block_dev && config->target_block_dev != config->root_block_dev) {
         vdisk_block_close(config->target_block_dev);
-        config->target_block_dev = NULL;
     }
+    config->target_block_dev = NULL;
     if (config->root_block_dev) {
         vdisk_block_close(config->root_block_dev);
         config->root_block_dev = NULL;
@@ -587,6 +664,9 @@ cleanup_and_exit:
 }
 
 static void vdisk_cleanup_atexit(void) {
+    if (g_main_proot_pid != 0 && getpid() != g_main_proot_pid) {
+        return; /* Never run persistence commit inside child tracees/subshells */
+    }
     if (g_active_config) {
         vdisk_do_commit_and_cleanup(g_active_config);
         g_active_config = NULL;
@@ -606,13 +686,13 @@ int vdisk_callback(Extension *extension, ExtensionEvent event,
             return -EINVAL;
         }
 
-        config = talloc_zero(extension, VdiskConfig);
-        if (!config) return -ENOMEM;
+        memset(&g_static_vdisk_config, 0, sizeof(g_static_vdisk_config));
+        config = &g_static_vdisk_config;
         config->ref_count = 1;
         config->persistent = g_vdisk_persistent;
         g_active_config = config;
         extension->config = config;
-
+        g_main_proot_pid = getpid();
         atexit(vdisk_cleanup_atexit);
 
         char img_path[PATH_MAX];
