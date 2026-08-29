@@ -146,7 +146,7 @@ static void print_execve_help(const Tracee *tracee, const char *argv0, int statu
 "  * the loader was not found or doesn't work.");
 }
 
-static void print_error_separator(const Tracee *tracee, const Argument *argument)
+static void print_error_separator(const Tracee *tracee UNUSED, const Argument *argument UNUSED)
 {
 	if (argument->separator == '\0')
 		note(tracee, ERROR, USER, "option '%s' expects no value.", argument->name);

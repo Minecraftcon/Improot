@@ -2,15 +2,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdarg.h>
+#include <sys/types.h>
 
 #include "shm.h"
 
 #define MAGIC_DIRFD 0x7BADF00D
 #define AT_FDCWD    -100
 #define AT_SYMLINK_NOFOLLOW 0x100
-
-typedef unsigned int mode_t;
-typedef long ssize_t;
 
 /* Forward declare errno functions across glibc, musl, and bionic */
 extern int *__errno_location(void) __attribute__((weak));
@@ -341,7 +339,7 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
     mode_t mode = 0;
     va_list args;
     va_start(args, flags);
-    mode = va_arg(args, mode_t);
+    mode = (mode_t)va_arg(args, int);
     va_end(args);
 
     char host_path[JIT_SHM_PATH_MAX];
@@ -367,7 +365,7 @@ int openat64(int dirfd, const char *pathname, int flags, ...) {
     mode_t mode = 0;
     va_list args;
     va_start(args, flags);
-    mode = va_arg(args, mode_t);
+    mode = (mode_t)va_arg(args, int);
     va_end(args);
 
     char host_path[JIT_SHM_PATH_MAX];
@@ -393,7 +391,7 @@ int open(const char *pathname, int flags, ...) {
     mode_t mode = 0;
     va_list args;
     va_start(args, flags);
-    mode = va_arg(args, mode_t);
+    mode = (mode_t)va_arg(args, int);
     va_end(args);
 
     char host_path[JIT_SHM_PATH_MAX];
@@ -419,7 +417,7 @@ int open64(const char *pathname, int flags, ...) {
     mode_t mode = 0;
     va_list args;
     va_start(args, flags);
-    mode = va_arg(args, mode_t);
+    mode = (mode_t)va_arg(args, int);
     va_end(args);
 
     char host_path[JIT_SHM_PATH_MAX];
