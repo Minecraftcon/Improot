@@ -112,9 +112,14 @@ else
     LIBVDISK_DIR="${SCRIPT_DIR}/deps/libvdisk"
 fi
 
+# Reset MAKEFLAGS to prevent inherited broken jobserver pipes on Android/Termux
+export MAKEFLAGS=""
+NJOBS="$(nproc 2>/dev/null || echo 2)"
+
 echo "[*] Building libvdisk at ${LIBVDISK_DIR}..."
 make -C "${LIBVDISK_DIR}" clean
-CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" CFLAGS="${CFLAGS}" make -C "${LIBVDISK_DIR}" -j"$(nproc 2>/dev/null || echo 2)"
+CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" CFLAGS="${CFLAGS}" make -C "${LIBVDISK_DIR}" -j"${NJOBS}" || \
+CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" CFLAGS="${CFLAGS}" make -C "${LIBVDISK_DIR}"
 
 # 3. Ensure talloc is available
 echo -e "\n[*] Checking talloc library..."
@@ -124,7 +129,7 @@ elif [ ! -f "${SCRIPT_DIR}/lib/talloc/dist/lib/libtalloc.so" ] && ! ${CC} -ltall
     echo "[*] System talloc not found. Building talloc from source..."
     cd "${SCRIPT_DIR}/lib/talloc"
     ./configure --prefix="$(pwd)/dist" --disable-python >/dev/null 2>&1
-    make -j"$(nproc 2>/dev/null || echo 2)" >/dev/null 2>&1
+    make -j"${NJOBS}" >/dev/null 2>&1 || make >/dev/null 2>&1
     make install >/dev/null 2>&1
     cd "${SCRIPT_DIR}"
 fi
@@ -133,7 +138,8 @@ fi
 echo -e "\n[*] Building Improot..."
 cd "${SCRIPT_DIR}/src"
 make clean || true
-LIBVDISK_DIR="${LIBVDISK_DIR}" CC="${CC}" LD="${CC}" STRIP="${STRIP}" CFLAGS="${CFLAGS}" make -j"$(nproc 2>/dev/null || echo 2)"
+LIBVDISK_DIR="${LIBVDISK_DIR}" CC="${CC}" LD="${CC}" STRIP="${STRIP}" CFLAGS="${CFLAGS}" make -j"${NJOBS}" || \
+LIBVDISK_DIR="${LIBVDISK_DIR}" CC="${CC}" LD="${CC}" STRIP="${STRIP}" CFLAGS="${CFLAGS}" make
 
 echo -e "\n================================================================================"
 echo " Build successful!"
