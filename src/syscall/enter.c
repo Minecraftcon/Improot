@@ -209,6 +209,7 @@ int translate_syscall_enter(Tracee *tracee)
 
 		tracee->fs->cwd = tmp;
 		talloc_set_name_const(tracee->fs->cwd, "$cwd");
+		invalidate_path_caches(tracee);
 
 		set_sysnum(tracee, PR_void);
 		status = 0;

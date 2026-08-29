@@ -148,6 +148,15 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 					IS_FINAL(finality) && recursion_level == 0);
 		if (status < 0)
 			return status;
+
+		/* Check negative symlink cache: if host_path is already known
+		 * to be a non-symlink (and valid directory if non-final), skip lstat. */
+		int i;
+		for (i = 0; i < NOSYM_CACHE_SIZE; i++) {
+			if (tracee->nosym_cache[i].valid
+			 && strcmp(tracee->nosym_cache[i].path, host_path) == 0)
+				return 0;
+		}
 	}
 
 	statl.st_mode = 0;
@@ -167,6 +176,14 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 	 * error is "Not a directory".  */
 	if (!IS_FINAL(finality) && !S_ISDIR(statl.st_mode) && !S_ISLNK(statl.st_mode))
 		return (status < 0 ? -errno : -ENOTDIR);
+
+	/* Record in negative symlink cache if confirmed not to be a symlink */
+	if (tracee->glue_type == 0 && status == 0 && !S_ISLNK(statl.st_mode)) {
+		int idx = tracee->nosym_cache_next++ % NOSYM_CACHE_SIZE;
+		strncpy(tracee->nosym_cache[idx].path, host_path, PATH_MAX - 1);
+		tracee->nosym_cache[idx].path[PATH_MAX - 1] = '\0';
+		tracee->nosym_cache[idx].valid = true;
+	}
 
 	return (S_ISLNK(statl.st_mode) ? 1 : 0);
 }

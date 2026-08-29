@@ -62,6 +62,7 @@ OBJECTS += \
 	syscall/seccomp.o	\
 	syscall/syscall.o	\
 	syscall/chain.o		\
+	jit/shm.o		\
 	syscall/enter.o		\
 	syscall/exit.o		\
 	syscall/sysnum.o	\
@@ -110,7 +111,7 @@ CARE_OBJECTS = 				\
 	extension/care/archive.o
 
 .DEFAULT_GOAL = proot
-all: proot
+all: proot libimproot-jit.so
 
 ######################################################################
 # Beautified output
@@ -197,6 +198,9 @@ $(LIBVDISK_DIR)/build/libvdisk.a:
 
 proot: $(OBJECTS) | $(LIBVDISK_DIR)/build/libvdisk.a
 	$(LINK)
+
+libimproot-jit.so: jit/jit_lib.c jit/shm.c
+	$($(quiet)CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared -o $@ $^ -ldl
 
 care: $(OBJECTS) $(CARE_OBJECTS) | $(LIBVDISK_DIR)/build/libvdisk.a
 	$(LINK) $(CARE_LDFLAGS)

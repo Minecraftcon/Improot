@@ -31,3 +31,4 @@ lib/talloc/.lock*
 *.lock*
 build/
 deps/
+*.so

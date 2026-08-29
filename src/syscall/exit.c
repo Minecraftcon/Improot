@@ -467,6 +467,38 @@ void translate_syscall_exit(Tracee *tracee)
 	poke_reg(tracee, SYSARG_RESULT, (word_t) status);
 
 end:
+	/* Invalidate path translation and negative symlink caches on successful
+	 * filesystem mutating syscalls. */
+	if ((int) syscall_result >= 0) {
+		switch (syscall_number) {
+		case PR_mkdir:
+		case PR_mkdirat:
+		case PR_rmdir:
+		case PR_unlink:
+		case PR_unlinkat:
+		case PR_rename:
+		case PR_renameat:
+		case PR_renameat2:
+		case PR_symlink:
+		case PR_symlinkat:
+		case PR_link:
+		case PR_linkat:
+		case PR_chdir:
+		case PR_fchdir:
+		case PR_pivot_root:
+		case PR_mount:
+		case PR_umount:
+		case PR_umount2:
+		case PR_mknod:
+		case PR_mknodat:
+		case PR_creat:
+			invalidate_path_caches(tracee);
+			break;
+		default:
+			break;
+		}
+	}
+
 	status = notify_extensions(tracee, SYSCALL_EXIT_END, 0, 0);
 	if (status < 0)
 		poke_reg(tracee, SYSARG_RESULT, (word_t) status);

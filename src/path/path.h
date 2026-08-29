@@ -79,6 +79,9 @@ extern void chop_finality(char *path);
 extern int translate_path(Tracee *tracee, char host_path[PATH_MAX],
 			int dir_fd, const char *guest_path, bool deref_final);
 
+extern void invalidate_path_caches(Tracee *tracee);
+
+
 extern int detranslate_path(Tracee *tracee, char path[PATH_MAX], const char t_referrer[PATH_MAX]);
 extern bool belongs_to_guestfs(const Tracee *tracee, const char *path);
 

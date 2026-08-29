@@ -30,6 +30,7 @@
 #include <sys/ptrace.h>/* enum __ptrace_request */
 #include <talloc.h>    /* talloc_*, */
 #include <stdint.h>    /* *int*_t, */
+#include <limits.h>    /* PATH_MAX, */
 #include <sys/wait.h>  /* __WAIT_* */
 #include "arch.h" /* word_t, user_regs_struct, */
 #include "compat.h"
@@ -182,6 +183,33 @@ typedef struct tracee {
 	 * initialization of a binding.  This variable is first
 	 * defined in bind_path() then used in build_glue().  */
 	mode_t glue_type;
+
+	/* LRU Path Translation Cache — avoids re-running canonicalize()
+	 * + substitute_binding() for the same guest path argument.
+	 * Keyed by (guest path, dir_fd, deref_final).
+	 * Invalidated on any write-class syscall exit.  */
+#define PATH_CACHE_SIZE 32
+	struct path_cache_entry {
+		char     guest[PATH_MAX]; /* key: raw guest path  */
+		char     host[PATH_MAX];  /* value: translated host path */
+		int      dir_fd;          /* key: dirfd or AT_FDCWD */
+		bool     deref_final;     /* key: symlink dereferencing mode */
+		bool     valid;
+		uint32_t lru_tick;
+	} path_cache[PATH_CACHE_SIZE];
+	uint32_t path_cache_tick;
+
+	/* Negative Symlink Cache — records host paths known NOT to be
+	 * symlinks, so substitute_binding_stat() can skip lstat() on
+	 * repeated canonicalize() passes through the same components.
+	 * Round-robin eviction. Invalidated alongside path_cache.  */
+#define NOSYM_CACHE_SIZE 64
+	struct {
+		char path[PATH_MAX];
+		bool valid;
+	} nosym_cache[NOSYM_CACHE_SIZE];
+	int nosym_cache_next;
+
 
 	/* During a sub-reconfiguration, the new setup is relatively
 	 * to @tracee's file-system name-space.  Also, @paths holds

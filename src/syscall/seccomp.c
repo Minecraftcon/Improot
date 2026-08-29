@@ -102,21 +102,67 @@ static int add_trace_syscall(struct sock_fprog *program, word_t syscall, int fla
 	if (syscall > UINT32_MAX)
 		return -ERANGE;
 
-	#define LENGTH_TRACE_SYSCALL 2
-	struct sock_filter statements[LENGTH_TRACE_SYSCALL] = {
-		/* Compare the accumulator with the expected syscall:
-		 * skip the next statement if not equal.  */
-		BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, syscall, 0, 1),
+	/* JIT Fastpath: If this is a path-based syscall, allow it without ptrace overhead
+	 * if arg0 (dirfd) is the magic JIT value (0x7BADF00D). */
+	bool is_path_syscall = (syscall == PR_openat || syscall == PR_newfstatat ||
+				syscall == PR_faccessat || syscall == PR_faccessat2 ||
+				syscall == PR_readlinkat || syscall == PR_mkdirat ||
+				syscall == PR_unlinkat || syscall == PR_renameat ||
+				syscall == PR_renameat2 || syscall == PR_symlinkat ||
+				syscall == PR_linkat || syscall == PR_mknodat ||
+				syscall == PR_utimensat || syscall == PR_utimensat_time64);
 
-		/* Notify the tracer.  */
-		BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_TRACE + flag)
-	};
+	if (is_path_syscall) {
+#include <endian.h>
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+#define LO_ARG0_OFFSET (offsetof(struct seccomp_data, args[0]))
+#else
+#define LO_ARG0_OFFSET (offsetof(struct seccomp_data, args[0]) + 4)
+#endif
+		#define MAGIC_DIRFD 0x7BADF00D
 
-	DEBUG_FILTER("FILTER:     trace if syscall == %ld\n", syscall);
+		#define LENGTH_TRACE_SYSCALL_JIT 5
+		struct sock_filter statements[LENGTH_TRACE_SYSCALL_JIT] = {
+			/* If not the expected syscall, jump over this block to the next syscall check */
+			BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, syscall, 0, 4),
 
-	status = add_statements(program, LENGTH_TRACE_SYSCALL, statements);
-	if (status < 0)
-		return status;
+			/* Load lower 32-bits of arg0 (dirfd) */
+			BPF_STMT(BPF_LD + BPF_W + BPF_ABS, LO_ARG0_OFFSET),
+
+			/* If arg0 != MAGIC_DIRFD, jump to TRACE */
+			BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, MAGIC_DIRFD, 0, 1),
+
+			/* Hit MAGIC_DIRFD: Native Fastpath, return ALLOW immediately */
+			BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+
+			/* Miss MAGIC_DIRFD: Standard trap, return TRACE */
+			BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_TRACE + flag)
+		};
+		DEBUG_FILTER("FILTER:     trace if syscall == %ld (with JIT fastpath)\n", syscall);
+		status = add_statements(program, LENGTH_TRACE_SYSCALL_JIT, statements);
+		if (status < 0)
+			return status;
+		/* Restore accumulator to sysnum for the next check! Wait, if it didn't match the syscall, 
+		   it jumped OVER this entire block, so the accumulator still has sysnum! 
+		   If it did match, it returned ALLOW or TRACE and exited the BPF program!
+		   So we don't need to restore accumulator. */
+	} else {
+		#define LENGTH_TRACE_SYSCALL 2
+		struct sock_filter statements[LENGTH_TRACE_SYSCALL] = {
+			/* Compare the accumulator with the expected syscall:
+			 * skip the next statement if not equal.  */
+			BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, syscall, 0, 1),
+
+			/* Notify the tracer.  */
+			BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_TRACE + flag)
+		};
+
+		DEBUG_FILTER("FILTER:     trace if syscall == %ld\n", syscall);
+
+		status = add_statements(program, LENGTH_TRACE_SYSCALL, statements);
+		if (status < 0)
+			return status;
+	}
 
 	return 0;
 }
@@ -127,7 +173,7 @@ static int add_trace_syscall(struct sock_fprog *program, word_t syscall, int fla
  * sanity check.  This function returns -errno if an error occurred,
  * otherwise 0.
  */
-static int end_arch_section(struct sock_fprog *program, size_t nb_traced_syscalls)
+static int end_arch_section(struct sock_fprog *program, size_t instructions_length)
 {
 	int status;
 
@@ -144,7 +190,7 @@ static int end_arch_section(struct sock_fprog *program, size_t nb_traced_syscall
 
 	/* Sanity check, see start_arch_section().  */
 	if (   talloc_array_length(program->filter) - program->len
-	    != LENGTH_END_SECTION + nb_traced_syscalls * LENGTH_TRACE_SYSCALL)
+	    != LENGTH_END_SECTION + instructions_length)
 		return -ERANGE;
 
 	return 0;
@@ -156,12 +202,11 @@ static int end_arch_section(struct sock_fprog *program, size_t nb_traced_syscall
  * sanity check.  This function returns -errno if an error occurred,
  * otherwise 0.
  */
-static int start_arch_section(struct sock_fprog *program, uint32_t arch, size_t nb_traced_syscalls)
+static int start_arch_section(struct sock_fprog *program, uint32_t arch, size_t instructions_length)
 {
 	const size_t arch_offset    = offsetof(struct seccomp_data, arch);
 	const size_t syscall_offset = offsetof(struct seccomp_data, nr);
-	const size_t section_length = LENGTH_END_SECTION +
-					nb_traced_syscalls * LENGTH_TRACE_SYSCALL;
+	const size_t section_length = LENGTH_END_SECTION + instructions_length;
 	int status;
 
 	/* Sanity checks.  */
@@ -190,8 +235,8 @@ static int start_arch_section(struct sock_fprog *program, uint32_t arch, size_t 
 		BPF_STMT(BPF_LD + BPF_W + BPF_ABS, syscall_offset)
 	};
 
-	DEBUG_FILTER("FILTER: if arch == %ld, up to %zdth statement\n",
-		arch, nb_traced_syscalls);
+	DEBUG_FILTER("FILTER: if arch == %ld, %zd instructions for syscalls\n",
+		arch, instructions_length);
 
 	status = add_statements(program, LENGTH_START_SECTION, statements);
 	if (status < 0)
@@ -256,7 +301,7 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 	size_t nb_archs = sizeof(seccomp_archs) / sizeof(SeccompArch);
 
 	struct sock_fprog program = { .len = 0, .filter = NULL };
-	size_t nb_traced_syscalls;
+	size_t instructions_length;
 	size_t i, j, k;
 	int status;
 
@@ -268,19 +313,27 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 	for (i = 0; i < nb_archs; i++) {
 		word_t syscall;
 
-		nb_traced_syscalls = 0;
+		instructions_length = 0;
 
 		/* Pre-compute the number of traced syscalls for this architecture.  */
 		for (j = 0; j < seccomp_archs[i].nb_abis; j++) {
 			for (k = 0; sysnums[k].value != PR_void; k++) {
 				syscall = detranslate_sysnum(seccomp_archs[i].abis[j], sysnums[k].value);
-				if (syscall != SYSCALL_AVOIDER)
-					nb_traced_syscalls++;
+				if (syscall != SYSCALL_AVOIDER) {
+					bool is_path_syscall = (syscall == PR_openat || syscall == PR_newfstatat ||
+								syscall == PR_faccessat || syscall == PR_faccessat2 ||
+								syscall == PR_readlinkat || syscall == PR_mkdirat ||
+								syscall == PR_unlinkat || syscall == PR_renameat ||
+								syscall == PR_renameat2 || syscall == PR_symlinkat ||
+								syscall == PR_linkat || syscall == PR_mknodat ||
+								syscall == PR_utimensat || syscall == PR_utimensat_time64);
+					instructions_length += is_path_syscall ? 5 : 2;
+				}
 			}
 		}
 
 		/* Filter: if handled architecture */
-		status = start_arch_section(&program, seccomp_archs[i].value, nb_traced_syscalls);
+		status = start_arch_section(&program, seccomp_archs[i].value, instructions_length);
 		if (status < 0)
 			goto end;
 
@@ -299,7 +352,7 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 		}
 
 		/* Filter: allow untraced syscalls for this architecture */
-		status = end_arch_section(&program, nb_traced_syscalls);
+		status = end_arch_section(&program, instructions_length);
 		if (status < 0)
 			goto end;
 	}
@@ -327,93 +380,113 @@ end:
 	return status;
 }
 
-/* List of sysnums handled by PRoot.  */
+/* List of sysnums handled by PRoot, ordered by execution frequency
+ * to minimize BPF instruction execution per syscall trap.  */
 static FilteredSysnum proot_sysnums[] = {
-	{ PR_accept,		FILTER_SYSEXIT },
-	{ PR_accept4,		FILTER_SYSEXIT },
+	/* Hot path: file open & stat */
+	{ PR_openat,		0 },
+	{ PR_open,		0 },
+	{ PR_newfstatat,	0 },
+	{ PR_stat,		0 },
+	{ PR_lstat,		0 },
+	{ PR_fstatat64,		0 },
+	{ PR_stat64,		0 },
+	{ PR_lstat64,		0 },
+	{ PR_statx,		0 },
+	{ PR_oldstat,		0 },
+	{ PR_oldlstat,		0 },
+
+	/* Hot path: access & links */
 	{ PR_access,		0 },
-	{ PR_acct,		0 },
-	{ PR_bind,		0 },
+	{ PR_faccessat,		0 },
+	{ PR_faccessat2,	0 },
+	{ PR_readlinkat,	FILTER_SYSEXIT },
+	{ PR_readlink,		FILTER_SYSEXIT },
+
+	/* Process lifecycle & memory */
+	{ PR_execve,		FILTER_SYSEXIT },
 	{ PR_brk,		FILTER_SYSEXIT },
+	{ PR_getcwd,		FILTER_SYSEXIT },
 	{ PR_chdir,		FILTER_SYSEXIT },
+	{ PR_fchdir,		FILTER_SYSEXIT },
+
+	/* Common mutations */
+	{ PR_mkdirat,		0 },
+	{ PR_mkdir,		0 },
+	{ PR_unlinkat,		0 },
+	{ PR_unlink,		0 },
+	{ PR_rmdir,		0 },
+	{ PR_renameat2,		FILTER_SYSEXIT },
+	{ PR_renameat,		FILTER_SYSEXIT },
+	{ PR_rename,		FILTER_SYSEXIT },
+	{ PR_creat,		0 },
+
+	/* Permissions and links */
 	{ PR_chmod,		0 },
+	{ PR_fchmodat,		0 },
 	{ PR_chown,		0 },
 	{ PR_chown32,		0 },
-	{ PR_chroot,		0 },
-	{ PR_connect,		0 },
-	{ PR_creat,		0 },
-	{ PR_execve,		FILTER_SYSEXIT },
-	{ PR_faccessat,		0 },
-	{ PR_fchdir,		FILTER_SYSEXIT },
-	{ PR_fchmodat,		0 },
 	{ PR_fchownat,		0 },
-	{ PR_fstatat64,		0 },
-	{ PR_futimesat,		0 },
-	{ PR_getcwd,		FILTER_SYSEXIT },
-	{ PR_getpeername,	FILTER_SYSEXIT },
-	{ PR_getsockname,	FILTER_SYSEXIT },
-	{ PR_getxattr,		0 },
-	{ PR_inotify_add_watch,	0 },
 	{ PR_lchown,		0 },
 	{ PR_lchown32,		0 },
-	{ PR_lgetxattr,		0 },
-	{ PR_link,		0 },
-	{ PR_linkat,		0 },
-	{ PR_listxattr,		0 },
-	{ PR_llistxattr,	0 },
-	{ PR_lremovexattr,	0 },
-	{ PR_lsetxattr,		0 },
-	{ PR_lstat,		0 },
-	{ PR_lstat64,		0 },
-	{ PR_mkdir,		0 },
-	{ PR_mkdirat,		0 },
-	{ PR_mknod,		0 },
-	{ PR_mknodat,		0 },
-	{ PR_mount,		0 },
-	{ PR_name_to_handle_at,	0 },
-	{ PR_newfstatat,	0 },
-	{ PR_oldlstat,		0 },
-	{ PR_oldstat,		0 },
-	{ PR_open,		0 },
-	{ PR_openat,		0 },
-	{ PR_pivot_root,	0 },
-	{ PR_prctl, 		0 },
-	{ PR_prlimit64,		FILTER_SYSEXIT },
-	{ PR_ptrace,		FILTER_SYSEXIT },
-	{ PR_readlink,		FILTER_SYSEXIT },
-	{ PR_readlinkat,	FILTER_SYSEXIT },
-	{ PR_removexattr,	0 },
-	{ PR_rename,		FILTER_SYSEXIT },
-	{ PR_renameat,		FILTER_SYSEXIT },
-	{ PR_renameat2,		FILTER_SYSEXIT },
-	{ PR_rmdir,		0 },
-	{ PR_setrlimit,		FILTER_SYSEXIT },
-	{ PR_setxattr,		0 },
-	{ PR_socketcall,	FILTER_SYSEXIT },
-	{ PR_stat,		0 },
-	{ PR_statx,		0 },
-	{ PR_faccessat2,	0 },
-	{ PR_stat64,		0 },
-	{ PR_statfs,		0 },
-	{ PR_statfs64,		0 },
-	{ PR_swapoff,		0 },
-	{ PR_swapon,		0 },
-	{ PR_symlink,		0 },
 	{ PR_symlinkat,		0 },
-	{ PR_truncate,		0 },
-	{ PR_truncate64,	0 },
-	{ PR_umount,		0 },
-	{ PR_umount2,		0 },
+	{ PR_symlink,		0 },
+	{ PR_linkat,		0 },
+	{ PR_link,		0 },
+
+	/* Sockets & network */
+	{ PR_connect,		0 },
+	{ PR_bind,		0 },
+	{ PR_accept,		FILTER_SYSEXIT },
+	{ PR_accept4,		FILTER_SYSEXIT },
+	{ PR_getsockname,	FILTER_SYSEXIT },
+	{ PR_getpeername,	FILTER_SYSEXIT },
+	{ PR_socketcall,	FILTER_SYSEXIT },
+
+	/* System info & limits */
 	{ PR_uname,		FILTER_SYSEXIT },
-	{ PR_unlink,		0 },
-	{ PR_unlinkat,		0 },
-	{ PR_uselib,		0 },
-	{ PR_utime,		0 },
-	{ PR_utimensat,		0 },
-	{ PR_utimensat_time64,		0 },
-	{ PR_utimes,		0 },
+	{ PR_prlimit64,		FILTER_SYSEXIT },
+	{ PR_setrlimit,		FILTER_SYSEXIT },
+	{ PR_prctl, 		0 },
+	{ PR_ptrace,		FILTER_SYSEXIT },
 	{ PR_wait4,		FILTER_SYSEXIT },
 	{ PR_waitpid,		FILTER_SYSEXIT },
+
+	/* Time & attributes */
+	{ PR_utimensat,		0 },
+	{ PR_utimensat_time64,	0 },
+	{ PR_futimesat,		0 },
+	{ PR_utimes,		0 },
+	{ PR_utime,		0 },
+	{ PR_truncate,		0 },
+	{ PR_truncate64,	0 },
+	{ PR_statfs,		0 },
+	{ PR_statfs64,		0 },
+
+	/* Extended attributes */
+	{ PR_getxattr,		0 },
+	{ PR_lgetxattr,		0 },
+	{ PR_setxattr,		0 },
+	{ PR_lsetxattr,		0 },
+	{ PR_listxattr,		0 },
+	{ PR_llistxattr,	0 },
+	{ PR_removexattr,	0 },
+	{ PR_lremovexattr,	0 },
+
+	/* Infrequent / Admin */
+	{ PR_inotify_add_watch,	0 },
+	{ PR_mknodat,		0 },
+	{ PR_mknod,		0 },
+	{ PR_mount,		0 },
+	{ PR_umount,		0 },
+	{ PR_umount2,		0 },
+	{ PR_pivot_root,	0 },
+	{ PR_chroot,		0 },
+	{ PR_swapon,		0 },
+	{ PR_swapoff,		0 },
+	{ PR_acct,		0 },
+	{ PR_name_to_handle_at,	0 },
+	{ PR_uselib,		0 },
 	FILTERED_SYSNUM_END,
 };
 
