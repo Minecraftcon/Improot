@@ -814,9 +814,13 @@ int vdisk_callback(Extension *extension, ExtensionEvent event,
         snprintf(sub, sizeof(sub), "%s/etc/resolv.conf", config->temp_cache_dir);
         struct stat st_res;
         if (stat(sub, &st_res) < 0) {
+            struct stat st_lnk;
+            if (lstat(sub, &st_lnk) == 0 && S_ISLNK(st_lnk.st_mode)) {
+                unlink(sub);
+            }
             if (stat("/etc/resolv.conf", &st_res) == 0) {
                 char cmd[PATH_MAX + 64];
-                snprintf(cmd, sizeof(cmd), "cp /etc/resolv.conf \"%s\"", sub);
+                snprintf(cmd, sizeof(cmd), "cp -L /etc/resolv.conf \"%s\" 2>/dev/null", sub);
                 (void)system(cmd);
             } else {
                 /* Android / Termux fallback: write standard public DNS resolvers */
@@ -864,8 +868,14 @@ int vdisk_callback(Extension *extension, ExtensionEvent event,
     }
 
     case INHERIT_PARENT: {
-        if (config) {
-            config->ref_count++;
+        return 1;
+    }
+
+    case INHERIT_CHILD: {
+        Extension *parent_ext = (Extension *)data1;
+        if (parent_ext) {
+            extension->config = parent_ext->config;
+            extension->filtered_sysnums = parent_ext->filtered_sysnums;
         }
         return 0;
     }
