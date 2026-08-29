@@ -26,54 +26,35 @@
 #include "vdisk/block.h"
 #include "vdisk/part.h"
 #include "vdisk/fs.h"
-#if defined(__has_include)
-#  if __has_include("uthash.h")
-#    include "uthash.h"
-#  elif __has_include("../../lib/uthash/src/uthash.h")
-#    include "../../lib/uthash/src/uthash.h"
-#  elif __has_include("../lib/uthash/src/uthash.h")
-#    include "../lib/uthash/src/uthash.h"
-#  elif __has_include("uthash/src/uthash.h")
-#    include "uthash/src/uthash.h"
-#  endif
-#else
-#  include "uthash.h"
-#endif
 
 #define MAX_EXCLUSIONS 64
 #define MAX_DISCOVERED_PATHS 256
+#define MAX_LOADED_DIRS 512
 
-typedef struct LoadedDir {
-    char path[PATH_MAX];
-    UT_hash_handle hh;
-} LoadedDir;
+typedef struct {
+    char paths[MAX_LOADED_DIRS][PATH_MAX];
+    int count;
+} LoadedDirs;
 
-static LoadedDir *g_loaded_dirs = NULL;
+static LoadedDirs g_loaded_dirs = {0};
 
 static bool vdisk_is_dir_loaded(const char *guest_path) {
     if (!guest_path) return false;
-    LoadedDir *entry = NULL;
-    HASH_FIND_STR(g_loaded_dirs, guest_path, entry);
-    return (entry != NULL);
+    for (int i = 0; i < g_loaded_dirs.count; i++) {
+        if (strcmp(g_loaded_dirs.paths[i], guest_path) == 0) return true;
+    }
+    return false;
 }
 
 static void vdisk_mark_dir_loaded(const char *guest_path) {
     if (!guest_path || vdisk_is_dir_loaded(guest_path)) return;
-    LoadedDir *entry = (LoadedDir *)malloc(sizeof(LoadedDir));
-    if (entry) {
-        strncpy(entry->path, guest_path, sizeof(entry->path) - 1);
-        entry->path[sizeof(entry->path) - 1] = '\0';
-        HASH_ADD_STR(g_loaded_dirs, path, entry);
+    if (g_loaded_dirs.count < MAX_LOADED_DIRS) {
+        strncpy(g_loaded_dirs.paths[g_loaded_dirs.count++], guest_path, PATH_MAX - 1);
     }
 }
 
 static void vdisk_clear_loaded_dirs(void) {
-    LoadedDir *cur, *tmp;
-    HASH_ITER(hh, g_loaded_dirs, cur, tmp) {
-        HASH_DEL(g_loaded_dirs, cur);
-        free(cur);
-    }
-    g_loaded_dirs = NULL;
+    g_loaded_dirs.count = 0;
 }
 
 typedef struct {
