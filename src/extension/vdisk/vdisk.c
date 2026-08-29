@@ -460,7 +460,12 @@ static int extract_vdisk_dir_full(vdisk_fs_t *fs, const char *guest_dir, const c
         snprintf(child_host, sizeof(child_host), "%s/%s", host_dir, dent.name);
 
         struct stat st;
-        if (lstat(child_host, &st) == 0) continue;
+        if (lstat(child_host, &st) == 0) {
+            if (!S_ISDIR(st.st_mode)) {
+                /* Existing regular file or symlink — preserve host/modified version */
+                continue;
+            }
+        }
 
         extract_vdisk_entry(fs, child_guest, child_host, depth + 1);
     }
@@ -748,6 +753,7 @@ int vdisk_callback(Extension *extension, ExtensionEvent event,
         return 0;
     }
 
+    case HOST_PATH:
     case TRANSLATED_PATH: {
         if (!config || !config->fs) return 0;
         char *host_path = (char *)data1;
@@ -760,7 +766,8 @@ int vdisk_callback(Extension *extension, ExtensionEvent event,
 
             struct stat st;
             if (lstat(host_path, &st) < 0) {
-                if (extract_vdisk_file_to_host(config->fs, guest_path, host_path) < 0) {
+                int res = extract_vdisk_file_to_host(config->fs, guest_path, host_path);
+                if (res < 0) {
                     ensure_parent_dirs(host_path);
                 }
             }
