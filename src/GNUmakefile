@@ -110,7 +110,7 @@ CARE_OBJECTS = 				\
 	extension/care/extract.o	\
 	extension/care/archive.o
 
-.DEFAULT_GOAL = proot
+.DEFAULT_GOAL = all
 all: proot libimproot-jit.so
 
 ######################################################################
@@ -183,14 +183,9 @@ BUILD_ID_NONE := $(shell if ld --build-id=none --version >/dev/null 2>&1; then e
 COMPILE = $($(quiet)CC) $(CPPFLAGS) $(CFLAGS) -MD -c $(SRC)$< -o $@
 LINK    = $($(quiet)LD) -o $@ $^ $(LDFLAGS)
 
-OBJIFY = $($(quiet)GEN)									\
-	$(OBJCOPY)									\
-		--input-target binary							\
-		--output-target `env LC_ALL=C $(OBJDUMP) -f cli/cli.o |			\
-			grep 'file format' | awk '{print $$4}'`				\
-		--binary-architecture `env LC_ALL=C $(OBJDUMP) -f cli/cli.o |		\
-				grep architecture | cut -f 1 -d , | awk '{print $$2}'`	\
-		$< $@
+OBJIFY = $($(quiet)GEN) \
+	SYM=$$(echo "$(notdir $<)" | sed 's/[^a-zA-Z0-9_]/_/g'); \
+	printf '.global _binary_%s_start\n.global _binary_%s_end\n.section .rodata, "a"\n_binary_%s_start:\n.incbin "$<"\n_binary_%s_end:\n' "$$SYM" "$$SYM" "$$SYM" "$$SYM" | $(CC) $(CPPFLAGS) $(CFLAGS) -x assembler -c - -o $@
 
 $(LIBVDISK_DIR)/build/libvdisk.a:
 	@echo "  BUILD	libvdisk ($@)"
@@ -199,8 +194,8 @@ $(LIBVDISK_DIR)/build/libvdisk.a:
 proot: $(OBJECTS) | $(LIBVDISK_DIR)/build/libvdisk.a
 	$(LINK)
 
-libimproot-jit.so: jit/jit_lib.c jit/shm.c
-	$($(quiet)CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared -o $@ $^ -ldl
+libimproot-jit.so: jit/jit_lib.c
+	$($(quiet)CC) -I. -I$(VPATH) -O3 -Wall -Wextra -fno-stack-protector -nostdlib -fPIC -shared -o $@ $^
 
 care: $(OBJECTS) $(CARE_OBJECTS) | $(LIBVDISK_DIR)/build/libvdisk.a
 	$(LINK) $(CARE_LDFLAGS)

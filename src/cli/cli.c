@@ -471,44 +471,17 @@ int main(int argc, char *const argv[])
 		goto error;
 	tracee->pid = getpid();
 
-	/* Pre-configure the first tracee.  */
-	status = parse_config(tracee, argc, argv);
-	if (status < 0)
-		goto error;
-
-	/* Initialize Learner JIT SHM Cache */
+	/* Initialize Learner JIT SHM Cache & Bindings before parse_config */
 	if (jit_shm_init() >= 0) {
 		char fd_str[32];
 		snprintf(fd_str, sizeof(fd_str), "%d", global_jit_shm_fd);
 		setenv("IMPROOT_JIT_FD", fd_str, 1);
-		
-		/* Append libimproot-jit.so to LD_PRELOAD */
-		char exe_path[PATH_MAX];
-		ssize_t exe_len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-		if (exe_len > 0) {
-			exe_path[exe_len] = '\0';
-			char *dir_path = dirname(exe_path);
-			char *jit_lib_path = talloc_asprintf(tracee->ctx, "%s/libimproot-jit.so", dir_path);
-			
-			const char *old_preload = getenv("LD_PRELOAD");
-			if (old_preload && strlen(old_preload) > 0) {
-				char *new_preload = talloc_asprintf(tracee->ctx, "%s:%s", jit_lib_path, old_preload);
-				setenv("LD_PRELOAD", new_preload, 1);
-			} else {
-				setenv("LD_PRELOAD", jit_lib_path, 1);
-			}
-		} else {
-			const char *old_preload = getenv("LD_PRELOAD");
-			if (old_preload && strlen(old_preload) > 0) {
-				char *new_preload = talloc_asprintf(tracee->ctx, "libimproot-jit.so:%s", old_preload);
-				setenv("LD_PRELOAD", new_preload, 1);
-			} else {
-				setenv("LD_PRELOAD", "libimproot-jit.so", 1);
-			}
-		}
-	} else {
-		fprintf(stderr, "warning: failed to initialize JIT SHM cache, falling back to standard tracing.\n");
 	}
+
+	/* Pre-configure the first tracee.  */
+	status = parse_config(tracee, argc, argv);
+	if (status < 0)
+		goto error;
 
 	/* Start the first tracee.  */
 	status = launch_process(tracee, &argv[status]);

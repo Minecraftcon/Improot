@@ -13,6 +13,7 @@
 #include <sys/param.h>
 #include <talloc.h>
 #include <errno.h>
+#include <libgen.h>
 
 #include "extension/extension.h"
 #include "extension/vdisk/vdisk.h"
@@ -865,6 +866,35 @@ int vdisk_callback(Extension *extension, ExtensionEvent event,
 
         /* Discover binary directories and export PATH if requested */
         vdisk_discover_and_export_paths(config->temp_cache_dir);
+
+        /* Copy libimproot-jit.so into guest root as a real file /.proot.jit.so */
+        char exe_path[PATH_MAX];
+        ssize_t exe_len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+        if (exe_len > 0) {
+            exe_path[exe_len] = '\0';
+            char *dir_path = dirname(exe_path);
+            char jit_src[PATH_MAX];
+            snprintf(jit_src, sizeof(jit_src), "%s/libimproot-jit.so", dir_path);
+            if (access(jit_src, R_OK) == 0) {
+                char jit_dst[PATH_MAX];
+                snprintf(jit_dst, sizeof(jit_dst), "%s/.proot.jit.so", config->temp_cache_dir);
+                unlink(jit_dst);
+                FILE *fin = fopen(jit_src, "rb");
+                if (fin) {
+                    FILE *fout = fopen(jit_dst, "wb");
+                    if (fout) {
+                        char buf[8192];
+                        size_t n;
+                        while ((n = fread(buf, 1, sizeof(buf), fin)) > 0) {
+                            fwrite(buf, 1, n, fout);
+                        }
+                        fclose(fout);
+                        chmod(jit_dst, 0755);
+                    }
+                    fclose(fin);
+                }
+            }
+        }
 
         extension->filtered_sysnums = vdisk_filtered_sysnums;
 

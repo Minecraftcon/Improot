@@ -50,12 +50,13 @@
  */
 void translate_syscall_exit(Tracee *tracee)
 {
-	word_t syscall_number;
-	word_t syscall_result;
+	word_t syscall_number = 0;
+	word_t syscall_result = (word_t) -1;
 	int status;
 
 	status = notify_extensions(tracee, SYSCALL_EXIT_START, 0, 0);
 	if (status < 0) {
+		syscall_result = (word_t) status;
 		poke_reg(tracee, SYSARG_RESULT, (word_t) status);
 		goto end;
 	}
@@ -65,6 +66,7 @@ void translate_syscall_exit(Tracee *tracee)
 	/* Set the tracee's errno if an error occured previously during
 	 * the translation. */
 	if (tracee->status < 0) {
+		syscall_result = (word_t) tracee->status;
 		poke_reg(tracee, SYSARG_RESULT, (word_t) tracee->status);
 		goto end;
 	}

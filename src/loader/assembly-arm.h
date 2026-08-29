@@ -36,10 +36,10 @@
 		"mov r0, #0				\n\t"	\
 		"					\n\t"	\
 		"// Start the program.			\n\t"	\
-		"mov pc, %1				\n"	\
+		"bx %1					\n"	\
 		: /* no output */				\
 		: "r" (stack_pointer), "r" (destination)	\
-		: "memory", "sp", "r0", "pc");			\
+		: "memory", "r0");				\
 	__builtin_unreachable();				\
 	} while (0)
 

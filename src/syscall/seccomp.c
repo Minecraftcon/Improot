@@ -94,7 +94,7 @@ static int add_statements(struct sock_fprog *program, size_t nb_statements,
  * about the given @syscall made by a tracee, with the given @flag.
  * This function returns -errno if an error occurred, otherwise 0.
  */
-static int add_trace_syscall(struct sock_fprog *program, word_t syscall, int flag)
+static int add_trace_syscall(struct sock_fprog *program, word_t syscall, Sysnum sysnum, int flag)
 {
 	int status;
 
@@ -104,13 +104,14 @@ static int add_trace_syscall(struct sock_fprog *program, word_t syscall, int fla
 
 	/* JIT Fastpath: If this is a path-based syscall, allow it without ptrace overhead
 	 * if arg0 (dirfd) is the magic JIT value (0x7BADF00D). */
-	bool is_path_syscall = (syscall == PR_openat || syscall == PR_newfstatat ||
-				syscall == PR_faccessat || syscall == PR_faccessat2 ||
-				syscall == PR_readlinkat || syscall == PR_mkdirat ||
-				syscall == PR_unlinkat || syscall == PR_renameat ||
-				syscall == PR_renameat2 || syscall == PR_symlinkat ||
-				syscall == PR_linkat || syscall == PR_mknodat ||
-				syscall == PR_utimensat || syscall == PR_utimensat_time64);
+	bool is_path_syscall = (sysnum == PR_openat || sysnum == PR_newfstatat ||
+				sysnum == PR_fstatat64 ||
+				sysnum == PR_faccessat || sysnum == PR_faccessat2 ||
+				sysnum == PR_readlinkat || sysnum == PR_mkdirat ||
+				sysnum == PR_unlinkat || sysnum == PR_renameat ||
+				sysnum == PR_renameat2 || sysnum == PR_symlinkat ||
+				sysnum == PR_linkat || sysnum == PR_mknodat ||
+				sysnum == PR_utimensat || sysnum == PR_utimensat_time64);
 
 	if (is_path_syscall) {
 #include <endian.h>
@@ -320,13 +321,14 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 			for (k = 0; sysnums[k].value != PR_void; k++) {
 				syscall = detranslate_sysnum(seccomp_archs[i].abis[j], sysnums[k].value);
 				if (syscall != SYSCALL_AVOIDER) {
-					bool is_path_syscall = (syscall == PR_openat || syscall == PR_newfstatat ||
-								syscall == PR_faccessat || syscall == PR_faccessat2 ||
-								syscall == PR_readlinkat || syscall == PR_mkdirat ||
-								syscall == PR_unlinkat || syscall == PR_renameat ||
-								syscall == PR_renameat2 || syscall == PR_symlinkat ||
-								syscall == PR_linkat || syscall == PR_mknodat ||
-								syscall == PR_utimensat || syscall == PR_utimensat_time64);
+					bool is_path_syscall = (sysnums[k].value == PR_openat || sysnums[k].value == PR_newfstatat ||
+								sysnums[k].value == PR_fstatat64 ||
+								sysnums[k].value == PR_faccessat || sysnums[k].value == PR_faccessat2 ||
+								sysnums[k].value == PR_readlinkat || sysnums[k].value == PR_mkdirat ||
+								sysnums[k].value == PR_unlinkat || sysnums[k].value == PR_renameat ||
+								sysnums[k].value == PR_renameat2 || sysnums[k].value == PR_symlinkat ||
+								sysnums[k].value == PR_linkat || sysnums[k].value == PR_mknodat ||
+								sysnums[k].value == PR_utimensat || sysnums[k].value == PR_utimensat_time64);
 					instructions_length += is_path_syscall ? 5 : 2;
 				}
 			}
@@ -345,7 +347,7 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 					continue;
 
 				/* Filter: trace if handled syscall */
-				status = add_trace_syscall(&program, syscall, sysnums[k].flags);
+				status = add_trace_syscall(&program, syscall, sysnums[k].value, sysnums[k].flags);
 				if (status < 0)
 					goto end;
 			}

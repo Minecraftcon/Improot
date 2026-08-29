@@ -87,6 +87,18 @@ int launch_process(Tracee *tracee, char *const argv[])
 		 * does the same thing. */
 		kill(getpid(), SIGSTOP);
 
+		/* Set LD_PRELOAD only inside the child tracee process */
+		if (getenv("IMPROOT_JIT_FD") != NULL) {
+			const char *old_preload = getenv("LD_PRELOAD");
+			if (old_preload && strlen(old_preload) > 0) {
+				char new_preload[PATH_MAX];
+				snprintf(new_preload, sizeof(new_preload), "/.proot.jit.so:%s", old_preload);
+				setenv("LD_PRELOAD", new_preload, 1);
+			} else {
+				setenv("LD_PRELOAD", "/.proot.jit.so", 1);
+			}
+		}
+
 		/* Improve performance by using seccomp mode 2, unless
 		 * this support is explicitly disabled.  */
 		if (getenv("PROOT_NO_SECCOMP") == NULL)

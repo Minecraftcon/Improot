@@ -124,8 +124,8 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg)
 			return status;
 
 		/* Symlink the original path to the intermediate one.  */
-			status = symlink(intermediate, original);
-			if (status < 0)
+		status = symlink(intermediate, original);
+		if (status < 0)
 			return status;
 	} else {
 		/*Move the original content to new location, by incrementing count at end of path. */
