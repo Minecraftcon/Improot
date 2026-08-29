@@ -1,17 +1,46 @@
-The copyright holder for PRoot and CARE is STMicroelectronics, these
-tools were originally developed in the Compilation Expertise Center by:
+================================================================================
+                          Improot — Authors & Contributors
+================================================================================
+
+Improot is a significant evolution of PRoot, extending it with a native
+userspace virtual disk engine (libvdisk), real-time persistence, automatic
+PATH discovery, and multi-format virtual drive support (QCOW2, VHD, RAW).
+
+Improot & libvdisk — New Features, Architecture & Storage Engine:
+
+Shubham Barman (Shado) <shubhambarman1221@gmail.com>
+        Author of Improot and libvdisk. Designed and implemented the userspace
+        virtual disk booting engine with support for QCOW2 v2/v3, Dynamic and
+        Fixed VHD, and RAW sparse disk formats. Authored the libvdisk block,
+        partition (MBR/GPT), and filesystem (ext4, FAT) driver stack. Engineered
+        real-time persistence commit (--commit/--persistent), automatic binary
+        directory scanner and PATH exporter (--setup-paths, -se), distro
+        codename virtualization, network DNS bridging, and the structured
+        Improot CLI with categorized help documentation.
+
+================================================================================
+                     PRoot & CARE — Original Authors & Credits
+================================================================================
+
+The copyright holder for PRoot and CARE is STMicroelectronics. These tools
+were originally developed in the Compilation Expertise Center by:
 
 Cédric VINCENT <cedric.vincent@st.com>
-        Original author, maintainer.
+        Original author and maintainer of PRoot. Designed the core ptrace-based
+        filesystem translation engine, syscall interception framework, and the
+        foundational path resolution, binding, and extension systems.
 
 Rémi DURAFFORT <remi.duraffort@st.com>
-        Improved the -0 feature, many experiments, bug reports, fixes, and articles.
+        Improved the -0 (root identity emulation) feature, conducted many
+        experiments, contributed bug reports, fixes, and technical articles.
 
 Christophe GUILLON <christophe.guillon@st.com>
-        Improved CARE, plugin experiments, bug reports, and fixes.
+        Improved CARE (Comprehensive Archiver for Reproducible Execution),
+        plugin experiments, bug reports, and fixes.
 
 Yves JANIN <yves.janin@st.com>
-        Support for the i386 architecture, many experiments and bug reports.
+        Added support for the i386 architecture. Conducted many experiments
+        and contributed valuable bug reports.
 
 Antoine MOYNAULT <antoine.moynault@st.com>
         Many experiments and bug reports.
@@ -20,10 +49,11 @@ Claire ROBINE <claire.robine@st.com>
         Many bug fixes.
 
 Clément BAZIN <clement@bazin-fr.org>
-        Plugins interface, dependency tracker plugin, and bug reports.
+        Designed the plugins interface and dependency tracker plugin.
+        Bug reports and improvements.
 
 Christian BERTIN <christian.bertin@st.com>
-        Valuable support.
+        Valuable support and guidance.
 
 Denis FERRANTI <denis.ferranti@st.com>
         Valuable support.
@@ -32,4 +62,6 @@ Paul GHALEB <paul.ghaleb@st.com>
         User manual review.
 
 Lucas Ramage <ramage.lucas@protonmail.com>
-        Website re-design, documentation, maintainer.
+        Website redesign, documentation improvements, maintainer.
+
+================================================================================
