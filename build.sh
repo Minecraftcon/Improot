@@ -96,19 +96,34 @@ case "${TARGET_ARCH}" in
         ;;
 esac
 
-# 2. Build libvdisk
-echo -e "\n[*] Building libvdisk..."
-make -C "${ROOT_DIR}/libvdisk" clean
-CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" CFLAGS="${CFLAGS}" make -C "${ROOT_DIR}/libvdisk" -j"$(nproc 2>/dev/null || echo 2)"
+# 2. Locate or auto-clone libvdisk
+echo -e "\n[*] Locating libvdisk..."
+LIBVDISK_DIR=""
+if [ -d "${ROOT_DIR}/libvdisk" ]; then
+    LIBVDISK_DIR="${ROOT_DIR}/libvdisk"
+elif [ -d "${SCRIPT_DIR}/deps/libvdisk" ]; then
+    LIBVDISK_DIR="${SCRIPT_DIR}/deps/libvdisk"
+elif [ -d "${SCRIPT_DIR}/libvdisk" ]; then
+    LIBVDISK_DIR="${SCRIPT_DIR}/libvdisk"
+else
+    echo "[*] libvdisk not found locally. Auto-cloning from https://github.com/Minecraftcon/libvdisk.git ..."
+    mkdir -p "${SCRIPT_DIR}/deps"
+    git clone https://github.com/Minecraftcon/libvdisk.git "${SCRIPT_DIR}/deps/libvdisk"
+    LIBVDISK_DIR="${SCRIPT_DIR}/deps/libvdisk"
+fi
+
+echo "[*] Building libvdisk at ${LIBVDISK_DIR}..."
+make -C "${LIBVDISK_DIR}" clean
+CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" CFLAGS="${CFLAGS}" make -C "${LIBVDISK_DIR}" -j"$(nproc 2>/dev/null || echo 2)"
 
 # 3. Build Improot
 echo -e "\n[*] Building Improot..."
 cd "${SCRIPT_DIR}/src"
 make clean || true
-CC="${CC}" LD="${CC}" STRIP="${STRIP}" CFLAGS="${CFLAGS}" make -j"$(nproc 2>/dev/null || echo 2)"
+LIBVDISK_DIR="${LIBVDISK_DIR}" CC="${CC}" LD="${CC}" STRIP="${STRIP}" CFLAGS="${CFLAGS}" make -j"$(nproc 2>/dev/null || echo 2)"
 
 echo -e "\n================================================================================"
 echo " Build successful!"
 echo " Output binary: ${SCRIPT_DIR}/src/proot"
-echo " libvdisk:      ${ROOT_DIR}/libvdisk/build/libvdisk.a"
+echo " libvdisk:      ${LIBVDISK_DIR}/build/libvdisk.a"
 echo "================================================================================"

@@ -20,10 +20,19 @@ PYTHON_MAJOR_VERSION = $(shell ${PYTHON} -c "import sys; print(sys.version_info.
 PYTHON_EMBED = $(shell ${PYTHON} -c "import sys; print('--embed' if sys.hexversion > 0x03080000 else '')" 2>/dev/null)
 HAS_PYTHON_CONFIG := $(shell ${PYTHON}-config --ldflags ${PYTHON_EMBED} 2>/dev/null)
 
-CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH) -I$(VPATH)/../lib/uthash/include -I$(VPATH)/../lib/talloc/dist/include -I$(VPATH)/../../libvdisk/include
+# Locate or automatically clone libvdisk
+LIBVDISK_DIR ?= $(firstword $(wildcard $(VPATH)/../../libvdisk $(VPATH)/../deps/libvdisk $(VPATH)/../libvdisk))
+
+ifeq ($(LIBVDISK_DIR),)
+    LIBVDISK_DIR := $(abspath $(VPATH)/../deps/libvdisk)
+    $(info [*] libvdisk not found locally. Auto-cloning from https://github.com/Minecraftcon/libvdisk.git ...)
+    $(shell mkdir -p $(VPATH)/../deps && git clone https://github.com/Minecraftcon/libvdisk.git $(LIBVDISK_DIR) 2>&1)
+endif
+
+CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH) -I$(VPATH)/../lib/uthash/include -I$(VPATH)/../lib/talloc/dist/include -I$(LIBVDISK_DIR)/include
 CFLAGS   += -g -Wall -Wextra -O2
 LDFLAGS  += -Wl,-z,noexecstack
-LDFLAGS  += -L$(VPATH)/../../libvdisk/build -Wl,-rpath,'$$ORIGIN/../../libvdisk/build' -lvdisk
+LDFLAGS  += -L$(LIBVDISK_DIR)/build -Wl,-rpath,'$$ORIGIN/../../libvdisk/build' -lvdisk
 LDFLAGS  += -L$(VPATH)/../lib/talloc/dist/lib -Wl,-rpath,'$$ORIGIN/../lib/talloc/dist/lib' -ltalloc
 
 CARE_LDFLAGS  = $(shell pkg-config --libs libarchive)
@@ -177,10 +186,14 @@ OBJIFY = $($(quiet)GEN)									\
 				grep architecture | cut -f 1 -d , | awk '{print $$2}'`	\
 		$< $@
 
-proot: $(OBJECTS)
+$(LIBVDISK_DIR)/build/libvdisk.a:
+	@echo "  BUILD	libvdisk ($@)"
+	$(MAKE) -C $(LIBVDISK_DIR) CC="$(CC)" AR="$(AR)" RANLIB="$(RANLIB)" CFLAGS="$(CFLAGS)"
+
+proot: $(OBJECTS) | $(LIBVDISK_DIR)/build/libvdisk.a
 	$(LINK)
 
-care: $(OBJECTS) $(CARE_OBJECTS)
+care: $(OBJECTS) $(CARE_OBJECTS) | $(LIBVDISK_DIR)/build/libvdisk.a
 	$(LINK) $(CARE_LDFLAGS)
 
 # Special case to compute which files depend on the auto-generated
