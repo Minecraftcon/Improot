@@ -26,7 +26,19 @@
 #include "vdisk/block.h"
 #include "vdisk/part.h"
 #include "vdisk/fs.h"
-#include "uthash.h"
+#if defined(__has_include)
+#  if __has_include("uthash.h")
+#    include "uthash.h"
+#  elif __has_include("../../lib/uthash/src/uthash.h")
+#    include "../../lib/uthash/src/uthash.h"
+#  elif __has_include("../lib/uthash/src/uthash.h")
+#    include "../lib/uthash/src/uthash.h"
+#  elif __has_include("uthash/src/uthash.h")
+#    include "uthash/src/uthash.h"
+#  endif
+#else
+#  include "uthash.h"
+#endif
 
 #define MAX_EXCLUSIONS 64
 #define MAX_DISCOVERED_PATHS 256
