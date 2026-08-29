@@ -32,7 +32,7 @@ endif
 CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH) -I$(VPATH)/../lib/uthash/include -I$(VPATH)/../lib/talloc/dist/include -I$(LIBVDISK_DIR)/include
 CFLAGS   += -g -Wall -Wextra -O2
 LDFLAGS  += -Wl,-z,noexecstack
-LDFLAGS  += -L$(LIBVDISK_DIR)/build -Wl,-rpath,'$$ORIGIN/../../libvdisk/build' -lvdisk
+LDFLAGS  += $(LIBVDISK_DIR)/build/libvdisk.a
 LDFLAGS  += -L$(VPATH)/../lib/talloc/dist/lib -Wl,-rpath,'$$ORIGIN/../lib/talloc/dist/lib' -ltalloc
 
 CARE_LDFLAGS  = $(shell pkg-config --libs libarchive)
