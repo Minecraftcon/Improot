@@ -29,7 +29,7 @@ ifeq ($(LIBVDISK_DIR),)
     $(shell mkdir -p $(VPATH)/../deps && git clone https://github.com/Minecraftcon/libvdisk.git $(LIBVDISK_DIR) 2>&1)
 endif
 
-CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH) -I$(VPATH)/../lib/uthash/include -I$(VPATH)/../lib/talloc/dist/include -I$(LIBVDISK_DIR)/include
+CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH) -I$(VPATH)/../lib/uthash/src -I$(VPATH)/../lib/uthash/include -I$(VPATH)/../lib/talloc/dist/include -I$(LIBVDISK_DIR)/include
 CFLAGS   += -g -Wall -Wextra -O2
 LDFLAGS  += -Wl,-z,noexecstack
 LDFLAGS  += $(LIBVDISK_DIR)/build/libvdisk.a -lz
