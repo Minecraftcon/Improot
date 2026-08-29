@@ -426,20 +426,17 @@ static int extract_vdisk_dir_shallow(vdisk_fs_t *fs, const char *guest_dir, cons
         if (vdisk_fs_stat(fs, child_guest, &vs) != VDISK_OK) continue;
 
         if (vs.type == VDISK_FILE_DIRECTORY) {
-            /* Create directory stub so the kernel sees it exists.
-             * Its children will be extracted on-demand via TRANSLATED_PATH. */
             mkdir(child_host, (vs.mode & 0777) ? (vs.mode & 0777) : 0755);
         } else if (vs.type == VDISK_FILE_SYMLINK) {
-            /* Symlinks must exist at boot time so path resolution chains work
-             * (e.g. /lib -> /lib64, /bin -> /usr/bin on modern distros). */
             char link_target[PATH_MAX] = {0};
             if (fs->ops && fs->ops->read_link &&
                 fs->ops->read_link(fs, child_guest, link_target, sizeof(link_target)) == VDISK_OK) {
                 unlink(child_host);
                 symlink(link_target, child_host);
             }
+        } else {
+            extract_vdisk_file_to_host(fs, child_guest, child_host);
         }
-        /* Regular files are intentionally skipped — extracted on first access. */
     }
 
     vdisk_dir_close(dir);
@@ -775,6 +772,8 @@ int vdisk_callback(Extension *extension, ExtensionEvent event,
             "/usr/lib/x86_64-linux-gnu", "/usr/lib/i386-linux-gnu",
             "/usr/local/bin", "/usr/local/sbin",
             "/etc",
+            "/root",
+            "/home",
             NULL
         };
         for (int d = 0; critical_full[d] != NULL; d++) {
