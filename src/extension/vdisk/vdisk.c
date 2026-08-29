@@ -483,7 +483,23 @@ static void vdisk_do_commit_and_cleanup(VdiskConfig *config) {
     if (!config || config->temp_cache_dir[0] == '\0') return;
 
     if (config->persistent) {
+        /* Safety check: do not commit if rootfs is broken or empty */
+        char check_bin[PATH_MAX];
+        char check_usr[PATH_MAX];
+        snprintf(check_bin, sizeof(check_bin), "%s/bin", config->temp_cache_dir);
+        snprintf(check_usr, sizeof(check_usr), "%s/usr", config->temp_cache_dir);
+        struct stat st_b, st_u;
+        if (lstat(check_bin, &st_b) < 0 && lstat(check_usr, &st_u) < 0) {
+            note(NULL, WARNING, USER, "vdisk: skipping persistence commit because cache directory is incomplete");
+            goto cleanup_and_exit;
+        }
+
         note(NULL, INFO, USER, "vdisk: syncing changes back to '%s'...", config->image_path);
+
+        /* Ensure any untouched files from the virtual disk are extracted so image is complete */
+        if (config->fs) {
+            extract_vdisk_dir_full(config->fs, "/", config->temp_cache_dir, 0);
+        }
 
         char sub[PATH_MAX];
         snprintf(sub, sizeof(sub), "rm -rf \"%s/tmp/\"* \"%s/run/\"* \"%s/proc/\"* \"%s/sys/\"* \"%s/dev/\"* 2>/dev/null",
@@ -533,17 +549,25 @@ static void vdisk_do_commit_and_cleanup(VdiskConfig *config) {
         } else {
             note(NULL, WARNING, USER, "vdisk: failed to rebuild filesystem image during persistence commit");
         }
-    } else {
-        if (config->fs) vdisk_fs_unmount(config->fs);
-        if (config->target_block_dev && config->target_block_dev != config->root_block_dev) {
-            vdisk_block_close(config->target_block_dev);
-        }
-        if (config->root_block_dev) vdisk_block_close(config->root_block_dev);
+    }
+
+cleanup_and_exit:
+    if (config->fs) {
+        vdisk_fs_unmount(config->fs);
+        config->fs = NULL;
+    }
+    if (config->target_block_dev && config->target_block_dev != config->root_block_dev) {
+        vdisk_block_close(config->target_block_dev);
+        config->target_block_dev = NULL;
+    }
+    if (config->root_block_dev) {
+        vdisk_block_close(config->root_block_dev);
+        config->root_block_dev = NULL;
     }
 
     if (strlen(config->temp_cache_dir) > 0) {
         char cmd[PATH_MAX + 16];
-        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", config->temp_cache_dir);
+        snprintf(cmd, sizeof(cmd), "rm -rf \"%s\" 2>/dev/null", config->temp_cache_dir);
         (void)system(cmd);
         config->temp_cache_dir[0] = '\0';
     }
@@ -638,12 +662,16 @@ int vdisk_callback(Extension *extension, ExtensionEvent event,
          */
         extract_vdisk_dir_shallow(config->fs, "/", config->temp_cache_dir);
 
+        char usr_h[PATH_MAX];
+        snprintf(usr_h, sizeof(usr_h), "%s/usr", config->temp_cache_dir);
+        extract_vdisk_dir_shallow(config->fs, "/usr", usr_h);
+
         /* Critical dirs: fully extracted so exec() + ld.so work immediately */
         const char *critical_full[] = {
             "/bin", "/sbin",
             "/lib", "/lib64", "/lib32",
             "/usr/bin", "/usr/sbin",
-            "/usr/lib", "/usr/lib64",
+            "/usr/lib", "/usr/lib64", "/usr/lib32", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu",
             "/usr/local/bin", "/usr/local/sbin",
             "/etc",
             NULL
@@ -651,10 +679,14 @@ int vdisk_callback(Extension *extension, ExtensionEvent event,
         for (int d = 0; critical_full[d] != NULL; d++) {
             char h[PATH_MAX];
             snprintf(h, sizeof(h), "%s%s", config->temp_cache_dir, critical_full[d]);
-            struct stat cst;
-            /* Only extract if this path actually exists on the virtual disk */
-            if (lstat(h, &cst) == 0 && S_ISDIR(cst.st_mode))
-                extract_vdisk_dir_full(config->fs, critical_full[d], h, 0);
+            vdisk_stat_t vs;
+            if (vdisk_fs_stat(config->fs, critical_full[d], &vs) == VDISK_OK) {
+                if (vs.type == VDISK_FILE_DIRECTORY) {
+                    extract_vdisk_dir_full(config->fs, critical_full[d], h, 0);
+                } else if (vs.type == VDISK_FILE_SYMLINK) {
+                    extract_vdisk_file_to_host(config->fs, critical_full[d], h);
+                }
+            }
         }
 
         /* Ensure essential directories exist */
