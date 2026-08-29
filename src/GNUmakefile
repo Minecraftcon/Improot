@@ -33,7 +33,12 @@ CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH) -I$(VPATH)/../li
 CFLAGS   += -g -Wall -Wextra -O2
 LDFLAGS  += -Wl,-z,noexecstack
 LDFLAGS  += $(LIBVDISK_DIR)/build/libvdisk.a
-LDFLAGS  += -L$(VPATH)/../lib/talloc/dist/lib -Wl,-rpath,'$$ORIGIN/../lib/talloc/dist/lib' -ltalloc
+
+# Check for local talloc dist build
+ifneq ($(wildcard $(VPATH)/../lib/talloc/dist/lib/libtalloc*),)
+    LDFLAGS += -L$(VPATH)/../lib/talloc/dist/lib -Wl,-rpath,'$$ORIGIN/../lib/talloc/dist/lib'
+endif
+LDFLAGS  += -ltalloc
 
 CARE_LDFLAGS  = $(shell pkg-config --libs libarchive)
 

@@ -116,7 +116,20 @@ echo "[*] Building libvdisk at ${LIBVDISK_DIR}..."
 make -C "${LIBVDISK_DIR}" clean
 CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" CFLAGS="${CFLAGS}" make -C "${LIBVDISK_DIR}" -j"$(nproc 2>/dev/null || echo 2)"
 
-# 3. Build Improot
+# 3. Ensure talloc is available
+echo -e "\n[*] Checking talloc library..."
+if [ "${TARGET_ARCH}" = "termux" ]; then
+    echo "[*] Using Termux talloc..."
+elif [ ! -f "${SCRIPT_DIR}/lib/talloc/dist/lib/libtalloc.so" ] && ! ${CC} -ltalloc -o /dev/null -x c - <<< "int main(){}" 2>/dev/null; then
+    echo "[*] System talloc not found. Building talloc from source..."
+    cd "${SCRIPT_DIR}/lib/talloc"
+    ./configure --prefix="$(pwd)/dist" --disable-python >/dev/null 2>&1
+    make -j"$(nproc 2>/dev/null || echo 2)" >/dev/null 2>&1
+    make install >/dev/null 2>&1
+    cd "${SCRIPT_DIR}"
+fi
+
+# 4. Build Improot
 echo -e "\n[*] Building Improot..."
 cd "${SCRIPT_DIR}/src"
 make clean || true

@@ -26,6 +26,8 @@ test/*
 
 # Build directories and lock files
 lib/talloc/bin/
+lib/talloc/dist/lib/
 lib/talloc/.lock*
 *.lock*
 build/
+deps/
