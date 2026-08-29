@@ -391,6 +391,7 @@ static int handle_option_setup_paths(Tracee *tracee UNUSED, const Cli *cli UNUSE
 
 static int handle_option_setup_exclude(Tracee *tracee UNUSED, const Cli *cli UNUSED, const char *value)
 {
+	vdisk_set_setup_paths(true);
 	if (value && strlen(value) > 0) {
 		vdisk_add_path_exclusion(value);
 	}

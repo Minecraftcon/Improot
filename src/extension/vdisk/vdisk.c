@@ -46,7 +46,7 @@ static char g_vdisk_cache_dir[PATH_MAX] = {0};
 static bool g_vdisk_persistent = false;
 static VdiskConfig *g_active_config = NULL;
 
-static bool g_setup_paths_enabled = true;
+static bool g_setup_paths_enabled = false;
 static char g_path_exclusions[MAX_EXCLUSIONS][PATH_MAX];
 static int g_num_exclusions = 0;
 static char g_discovered_path_env[8192] = {0};
