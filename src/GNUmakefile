@@ -30,8 +30,8 @@ ifeq ($(LIBVDISK_DIR),)
 endif
 
 CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH) -I$(VPATH)/../lib/uthash/src -I$(VPATH)/../lib/uthash/include -I$(VPATH)/../lib/talloc/dist/include -I$(LIBVDISK_DIR)/include
-CFLAGS   += -g -Wall -Wextra -O2
-LDFLAGS  += -Wl,-z,noexecstack
+CFLAGS   += -Wall -Wextra -O3 -flto
+LDFLAGS  += -Wl,-z,noexecstack -flto
 LDFLAGS  += $(LIBVDISK_DIR)/build/libvdisk.a -lz
 
 # Check for local talloc dist build
