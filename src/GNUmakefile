@@ -327,6 +327,11 @@ DEPS = $(OBJECTS:.o=.d) $(CARE_OBJECTS:.o=.d) $(LOADER_OBJECTS:.o=.d) $(LOADER-m
 ######################################################################
 # PHONY targets
 
+ifeq ($(PREFIX),/usr/local)
+  ifneq ($(wildcard /data/data/com.termux/files/usr),)
+    PREFIX = /data/data/com.termux/files/usr
+  endif
+endif
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 

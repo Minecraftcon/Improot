@@ -4,6 +4,22 @@ project(improot C ASM)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# ----------------------------------------------------------------------
+# Automatic Install Prefix Detection (Termux / Custom Environment)
+# ----------------------------------------------------------------------
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    if(DEFINED ENV{PREFIX} AND IS_DIRECTORY "$ENV{PREFIX}")
+        set(CMAKE_INSTALL_PREFIX "$ENV{PREFIX}" CACHE PATH "Install path prefix" FORCE)
+        message(STATUS "Auto-detected install prefix from $PREFIX: ${CMAKE_INSTALL_PREFIX}")
+    elseif(DEFINED ENV{TERMUX_PREFIX} AND IS_DIRECTORY "$ENV{TERMUX_PREFIX}")
+        set(CMAKE_INSTALL_PREFIX "$ENV{TERMUX_PREFIX}" CACHE PATH "Install path prefix" FORCE)
+        message(STATUS "Auto-detected install prefix from $TERMUX_PREFIX: ${CMAKE_INSTALL_PREFIX}")
+    elseif(EXISTS "/data/data/com.termux/files/usr")
+        set(CMAKE_INSTALL_PREFIX "/data/data/com.termux/files/usr" CACHE PATH "Install path prefix" FORCE)
+        message(STATUS "Auto-detected Termux environment, install prefix: ${CMAKE_INSTALL_PREFIX}")
+    endif()
+endif()
+
 include(GNUInstallDirs)
 
 # Options
