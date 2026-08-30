@@ -87,8 +87,8 @@ int launch_process(Tracee *tracee, char *const argv[])
 		 * does the same thing. */
 		kill(getpid(), SIGSTOP);
 
-		/* Set LD_PRELOAD cleanly for the guest without host Termux pollution */
-		if (getenv("IMPROOT_JIT_FD") != NULL) {
+		/* Set LD_PRELOAD cleanly for the guest if JIT library is present */
+		if (getenv("IMPROOT_JIT_FD") != NULL && access("/.proot.jit.so", F_OK) == 0) {
 			setenv("LD_PRELOAD", "/.proot.jit.so", 1);
 		} else {
 			unsetenv("LD_PRELOAD");
