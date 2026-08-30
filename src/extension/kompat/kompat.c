@@ -593,6 +593,55 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 		return 0;
 	}
 
+	case PR_statx:
+		if (needs_kompat(config, KERNEL_VERSION(4,11,0))) {
+			set_sysnum(tracee, SYSCALL_AVOIDER);
+			tracee->status = -ENOSYS;
+		}
+		return 0;
+
+	case PR_rseq:
+		if (needs_kompat(config, KERNEL_VERSION(4,18,0))) {
+			set_sysnum(tracee, SYSCALL_AVOIDER);
+			tracee->status = -ENOSYS;
+		}
+		return 0;
+
+	case PR_clone3:
+		if (needs_kompat(config, KERNEL_VERSION(5,3,0))) {
+			set_sysnum(tracee, SYSCALL_AVOIDER);
+			tracee->status = -ENOSYS;
+		}
+		return 0;
+
+	case PR_faccessat2:
+		if (needs_kompat(config, KERNEL_VERSION(5,8,0))) {
+			set_sysnum(tracee, SYSCALL_AVOIDER);
+			tracee->status = -ENOSYS;
+		}
+		return 0;
+
+	case PR_close_range:
+		if (needs_kompat(config, KERNEL_VERSION(5,9,0))) {
+			set_sysnum(tracee, SYSCALL_AVOIDER);
+			tracee->status = -ENOSYS;
+		}
+		return 0;
+
+	case PR_openat2:
+		if (needs_kompat(config, KERNEL_VERSION(5,6,0))) {
+			set_sysnum(tracee, SYSCALL_AVOIDER);
+			tracee->status = -ENOSYS;
+		}
+		return 0;
+
+	case PR_epoll_pwait2:
+		if (needs_kompat(config, KERNEL_VERSION(5,11,0))) {
+			set_sysnum(tracee, SYSCALL_AVOIDER);
+			tracee->status = -ENOSYS;
+		}
+		return 0;
+
 	default:
 		return 0;
 	}
@@ -1007,6 +1056,13 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_timerfd_create,	FILTER_SYSEXIT },
 	{ PR_uname, 		FILTER_SYSEXIT },
 	{ PR_unlinkat, 		0 },
+	{ PR_statx, 		0 },
+	{ PR_rseq, 		0 },
+	{ PR_clone3, 		0 },
+	{ PR_faccessat2, 	0 },
+	{ PR_close_range, 	0 },
+	{ PR_openat2, 		0 },
+	{ PR_epoll_pwait2, 	0 },
 	FILTERED_SYSNUM_END,
 };
 
