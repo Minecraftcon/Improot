@@ -496,12 +496,22 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 	int first_link = 1;
 	int intermediate_suffix = 1;
 
+	char target_path[PATH_MAX];
+	struct stat target_stat;
+
 	/* Note: this path was already canonicalized.  */
 	size = read_string(tracee, original, peek_reg(tracee, CURRENT, sysarg), PATH_MAX);
 	if (size < 0)
 		return size;
 	if (size >= PATH_MAX)
 		return -ENAMETOOLONG;
+
+	/* Check if the link target already exists (standard link behavior returns EEXIST) */
+	status = read_path(tracee, target_path, peek_reg(tracee, CURRENT, link_target_sysarg));
+	if (status < 0)
+		return status;
+	if (lstat(target_path, &target_stat) == 0)
+		return -EEXIST;
 
 	/* Sanity check: directories can't be linked.  */
 	status = lstat(original, &statl);
@@ -621,11 +631,7 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 	}
 
 	/* Perform symlink() operation within PRoot.  */
-	status = read_path(tracee, final, peek_reg(tracee, CURRENT, link_target_sysarg));
-	if (status >= 0) {
-		status = symlink(intermediate, final);
-		if (status < 0) status = -errno;
-	}
+	status = symlink(intermediate, target_path);
 	if (status < 0) {
 		status = -errno;
 		decrement_link_count(tracee, sysarg);
