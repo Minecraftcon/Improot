@@ -95,7 +95,7 @@ typedef unsigned char byte_t;
     #define SECCOMP_ARCHS { { .value = AUDIT_ARCH_ARM, .nb_abis = 1, .abis = { ABI_DEFAULT } } }
 
     #define user_regs_struct user_regs
-    #define HOST_ELF_MACHINE {40, 0};
+    #define HOST_ELF_MACHINE {40, 0}
     #define RED_ZONE_SIZE 0
     #define OFFSETOF_STAT_UID_32 0
     #define OFFSETOF_STAT_GID_32 0
