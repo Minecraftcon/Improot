@@ -57,6 +57,31 @@ if(NOT ZLIB_LIBRARIES)
     set(ZLIB_LIBRARIES z)
 endif()
 
+# Check for seccomp filter support
+check_c_source_compiles("
+#include <sys/prctl.h>
+#include <linux/seccomp.h>
+#include <linux/filter.h>
+#include <linux/audit.h>
+int main(void) {
+    struct sock_filter filter[] = {
+        BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog prog = {
+        .len = 1,
+        .filter = filter,
+    };
+    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
+}
+" HAVE_SECCOMP_FILTER_COMPILES)
+
+if(HAVE_SECCOMP_FILTER_COMPILES)
+    set(HAVE_SECCOMP_FILTER ON)
+else()
+    set(HAVE_SECCOMP_FILTER OFF)
+endif()
+
 # Check for process_vm_readv
 check_symbol_exists(process_vm_readv "sys/uio.h" HAVE_PROCESS_VM_READV)
 if(HAVE_PROCESS_VM_READV)
