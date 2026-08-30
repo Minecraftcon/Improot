@@ -829,6 +829,14 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 		}
 
 		default:
+			if (signal == SIGSEGV) {
+				siginfo_t si = {};
+				ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &si);
+				VERBOSE(tracee, 1, "SIGSEGV at ip=0x%lx sp=0x%lx addr=%p code=%d",
+					peek_reg(tracee, CURRENT, INSTR_POINTER),
+					peek_reg(tracee, CURRENT, STACK_POINTER),
+					si.si_addr, si.si_code);
+			}
 			/* Deliver this signal as-is,
 			 * unless we're chaining syscall.  */
 			if (tracee->chain.syscalls != NULL || tracee->restore_original_regs_after_seccomp_event) {
