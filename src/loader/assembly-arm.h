@@ -45,62 +45,49 @@
 	__builtin_unreachable();				\
 	} while (0)
 
-#define PREPARE_ARGS_1(arg1_)				\
-	register word_t arg1 asm("r0") = arg1_;		\
+static inline __attribute__((always_inline)) word_t syscall_1(word_t number, word_t a1)
+{
+	register word_t r0 asm("r0") = a1;
+	register word_t r7 asm("r7") = number;
+	asm volatile("svc #0" : "+r"(r0) : "r"(r7) : "memory");
+	return r0;
+}
 
-#define PREPARE_ARGS_3(arg1_, arg2_, arg3_)		\
-	PREPARE_ARGS_1(arg1_)				\
-	register word_t arg2 asm("r1") = arg2_;		\
-	register word_t arg3 asm("r2") = arg3_;		\
+static inline __attribute__((always_inline)) word_t syscall_3(word_t number, word_t a1, word_t a2, word_t a3)
+{
+	register word_t r0 asm("r0") = a1;
+	register word_t r1 asm("r1") = a2;
+	register word_t r2 asm("r2") = a3;
+	register word_t r7 asm("r7") = number;
+	asm volatile("svc #0" : "+r"(r0) : "r"(r1), "r"(r2), "r"(r7) : "memory");
+	return r0;
+}
 
-#define PREPARE_ARGS_6(arg1_, arg2_, arg3_, arg4_, arg5_, arg6_)	\
-	PREPARE_ARGS_3(arg1_, arg2_, arg3_)				\
-	register word_t arg4 asm("r3") = arg4_;				\
-	register word_t arg5 asm("r4") = arg5_;				\
-	register word_t arg6 asm("r5") = arg6_;
+static inline __attribute__((always_inline)) word_t syscall_4(word_t number, word_t a1, word_t a2, word_t a3, word_t a4)
+{
+	register word_t r0 asm("r0") = a1;
+	register word_t r1 asm("r1") = a2;
+	register word_t r2 asm("r2") = a3;
+	register word_t r3 asm("r3") = a4;
+	register word_t r7 asm("r7") = number;
+	asm volatile("svc #0" : "+r"(r0) : "r"(r1), "r"(r2), "r"(r3), "r"(r7) : "memory");
+	return r0;
+}
 
-#define OUTPUT_CONTRAINTS_1			\
-	"r" (arg1)
+static inline __attribute__((always_inline)) word_t syscall_6(word_t number, word_t a1, word_t a2, word_t a3, word_t a4, word_t a5, word_t a6)
+{
+	register word_t r0 asm("r0") = a1;
+	register word_t r1 asm("r1") = a2;
+	register word_t r2 asm("r2") = a3;
+	register word_t r3 asm("r3") = a4;
+	register word_t r4 asm("r4") = a5;
+	register word_t r5 asm("r5") = a6;
+	register word_t r7 asm("r7") = number;
+	asm volatile("svc #0" : "+r"(r0) : "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r5), "r"(r7) : "memory");
+	return r0;
+}
 
-#define OUTPUT_CONTRAINTS_3			\
-	OUTPUT_CONTRAINTS_1,			\
-	"r" (arg2), "r" (arg3)
-
-#define OUTPUT_CONTRAINTS_6				\
-	OUTPUT_CONTRAINTS_3,				\
-	"r" (arg4), "r" (arg5), "r" (arg6)
-
-#ifdef __thumb__
-#define STRINGIFY_EXPANDED(s) #s
-#define SYSCALL(number_, nb_args, args...)			\
-	({							\
-		register word_t result asm("r0");		\
-		PREPARE_ARGS_##nb_args(args)			\
-			asm volatile (				\
-				"push {r7}		\n\t"	\
-				"mov r7, #" STRINGIFY_EXPANDED(number_) "\n\t"	\
-				"svc #0x00000000	\n\t"	\
-				"pop {r7}		\n\t"	\
-				: "=r" (result)			\
-				: OUTPUT_CONTRAINTS_##nb_args	\
-				: "memory");			\
-			result;					\
-	})
-#else
-#define SYSCALL(number_, nb_args, args...)			\
-	({							\
-		register word_t number asm("r7") = number_;	\
-		register word_t result asm("r0");		\
-		PREPARE_ARGS_##nb_args(args)			\
-			asm volatile (				\
-				"svc #0x00000000	\n\t"	\
-				: "=r" (result)			\
-				: "r" (number),			\
-				OUTPUT_CONTRAINTS_##nb_args	\
-				: "memory");			\
-			result;					\
-	})
-#endif
+#define SYSCALL(number_, nb_args, args...) syscall_##nb_args((word_t)(number_), args)
 
 #define OPEN	5
 #define CLOSE	6
