@@ -619,6 +619,19 @@ static int handle_tracee_event_kernel_4_8(Tracee *tracee, int tracee_status)
 			tracee->restart_how = (tracee->seccomp == ENABLED ? PTRACE_CONT : PTRACE_SYSCALL);
 			break;
 
+		case SIGSEGV: {
+			siginfo_t siginfo;
+			bzero(&siginfo, sizeof(siginfo));
+			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
+			fetch_regs(tracee);
+			note(tracee, ERROR, INTERNAL, "SIGSEGV at %p (code %d), pc=0x%lx, sp=0x%lx, r0=0x%lx",
+				siginfo.si_addr, siginfo.si_code,
+				peek_reg(tracee, CURRENT, INSTR_POINTER),
+				peek_reg(tracee, CURRENT, STACK_POINTER),
+				peek_reg(tracee, CURRENT, SYSARG_1));
+			break;
+		}
+
 		default:
 			/* Deliver this signal as-is.  */
 			break;
@@ -858,6 +871,19 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			push_regs(tracee);
 			tracee->restart_how = (tracee->seccomp == ENABLED ? PTRACE_CONT : PTRACE_SYSCALL);
 			break;
+
+		case SIGSEGV: {
+			siginfo_t siginfo;
+			bzero(&siginfo, sizeof(siginfo));
+			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
+			fetch_regs(tracee);
+			note(tracee, ERROR, INTERNAL, "SIGSEGV at %p (code %d), pc=0x%lx, sp=0x%lx, r0=0x%lx",
+				siginfo.si_addr, siginfo.si_code,
+				peek_reg(tracee, CURRENT, INSTR_POINTER),
+				peek_reg(tracee, CURRENT, STACK_POINTER),
+				peek_reg(tracee, CURRENT, SYSARG_1));
+			break;
+		}
 
 		default:
 			/* Deliver this signal as-is.  */
