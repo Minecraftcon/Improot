@@ -145,7 +145,7 @@ void translate_syscall_exit(Tracee *tracee)
 
 		sock_addr = peek_reg(tracee, ORIGINAL, SYSARG_2);
 		size_addr = peek_reg(tracee, ORIGINAL, SYSARG_3);
-		max_size  = peek_reg(tracee, MODIFIED, SYSARG_6);
+		max_size  = peek_reg(tracee, CURRENT, SYSARG_6);
 
 		status = translate_socketcall_exit(tracee, sock_addr, size_addr, max_size);
 		if (status < 0)
@@ -222,7 +222,7 @@ void translate_syscall_exit(Tracee *tracee)
 		 * error occured.  */
 		sock_addr = PEEK_WORD(SYSARG_ADDR(2));
 		size_addr = PEEK_WORD(SYSARG_ADDR(3));
-		max_size  = peek_reg(tracee, MODIFIED, SYSARG_6);
+		max_size  = peek_reg(tracee, CURRENT, SYSARG_6);
 
 		status = translate_socketcall_exit(tracee, sock_addr, size_addr, max_size);
 		if (status < 0)
