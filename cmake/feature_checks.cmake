@@ -83,8 +83,17 @@ else()
 endif()
 
 # Check for process_vm_readv
-check_symbol_exists(process_vm_readv "sys/uio.h" HAVE_PROCESS_VM_READV)
-if(HAVE_PROCESS_VM_READV)
+check_c_source_compiles("
+#define _GNU_SOURCE
+#include <sys/uio.h>
+#include <unistd.h>
+int main(void) {
+    struct iovec local = {0}, remote = {0};
+    return (int)process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+}
+" HAVE_PROCESS_VM_COMPILES)
+
+if(HAVE_PROCESS_VM_COMPILES)
     set(HAVE_PROCESS_VM ON)
 else()
     set(HAVE_PROCESS_VM OFF)
