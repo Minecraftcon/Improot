@@ -104,7 +104,7 @@ int launch_process(Tracee *tracee, char *const argv[])
 		 * "foreign" binaries (ENOEXEC) but can handle execvp(3) on such
 		 * binaries.  */
 		execvp(tracee->exe, argv[0] != NULL ? argv : default_argv);
-		return -errno;
+		_exit(EXIT_FAILURE);
 
 	default: /* parent */
 		/* We know the pid of the first tracee now.  */
@@ -608,16 +608,35 @@ static int handle_tracee_event_kernel_4_8(Tracee *tracee, int tracee_status)
 			}
 			break;
 
-		case SIGSYS:
-			/* Trap Android OS / host kernel seccomp filter violations
-			 * (e.g. statx, clone3, faccessat2, rseq unsupported by host kernel)
-			 * and return -ENOSYS gracefully to let the guest fallback. */
-			signal = 0;
+		case SIGSYS: {
+			siginfo_t siginfo;
+			bzero(&siginfo, sizeof(siginfo));
+			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
 			fetch_regs(tracee);
+			word_t pc = peek_reg(tracee, CURRENT, INSTR_POINTER);
+			note(tracee, WARNING, INTERNAL, "SIGSYS: sysnum=%d (0x%x), call_addr=%p, pc=0x%lx",
+				siginfo.si_syscall, siginfo.si_syscall, siginfo.si_call_addr, pc);
+			signal = 0;
 			poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
+#if defined(ARCH_ARM_EABI)
+			word_t cpsr = tracee->_regs[CURRENT].uregs[16];
+			bool is_thumb = (cpsr & 0x20) != 0;
+			if (pc == (word_t)siginfo.si_call_addr) {
+				poke_reg(tracee, INSTR_POINTER, pc + (is_thumb ? 2 : 4));
+			}
+#elif defined(ARCH_ARM64)
+			if (pc == (word_t)siginfo.si_call_addr) {
+				poke_reg(tracee, INSTR_POINTER, pc + 4);
+			}
+#elif defined(ARCH_X86_64) || defined(ARCH_X86)
+			if (pc == (word_t)siginfo.si_call_addr) {
+				poke_reg(tracee, INSTR_POINTER, pc + 2);
+			}
+#endif
 			push_regs(tracee);
 			tracee->restart_how = (tracee->seccomp == ENABLED ? PTRACE_CONT : PTRACE_SYSCALL);
 			break;
+		}
 
 		case SIGSEGV: {
 			siginfo_t siginfo;
@@ -861,16 +880,35 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			}
 			break;
 
-		case SIGSYS:
-			/* Trap Android OS / host kernel seccomp filter violations
-			 * (e.g. statx, clone3, faccessat2, rseq unsupported by host kernel)
-			 * and return -ENOSYS gracefully to let the guest fallback. */
-			signal = 0;
+		case SIGSYS: {
+			siginfo_t siginfo;
+			bzero(&siginfo, sizeof(siginfo));
+			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
 			fetch_regs(tracee);
+			word_t pc = peek_reg(tracee, CURRENT, INSTR_POINTER);
+			note(tracee, WARNING, INTERNAL, "SIGSYS: sysnum=%d (0x%x), call_addr=%p, pc=0x%lx",
+				siginfo.si_syscall, siginfo.si_syscall, siginfo.si_call_addr, pc);
+			signal = 0;
 			poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
+#if defined(ARCH_ARM_EABI)
+			word_t cpsr = tracee->_regs[CURRENT].uregs[16];
+			bool is_thumb = (cpsr & 0x20) != 0;
+			if (pc == (word_t)siginfo.si_call_addr) {
+				poke_reg(tracee, INSTR_POINTER, pc + (is_thumb ? 2 : 4));
+			}
+#elif defined(ARCH_ARM64)
+			if (pc == (word_t)siginfo.si_call_addr) {
+				poke_reg(tracee, INSTR_POINTER, pc + 4);
+			}
+#elif defined(ARCH_X86_64) || defined(ARCH_X86)
+			if (pc == (word_t)siginfo.si_call_addr) {
+				poke_reg(tracee, INSTR_POINTER, pc + 2);
+			}
+#endif
 			push_regs(tracee);
 			tracee->restart_how = (tracee->seccomp == ENABLED ? PTRACE_CONT : PTRACE_SYSCALL);
 			break;
+		}
 
 		case SIGSEGV: {
 			siginfo_t siginfo;
