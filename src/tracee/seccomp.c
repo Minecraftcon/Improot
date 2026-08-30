@@ -136,8 +136,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 	int status;
 	Sysnum sysnum = get_sysnum(tracee, CURRENT);
 
-	fprintf(stderr, "[improot-sigsys] pid=%d sysnum=%ld\n", tracee->pid, (long)sysnum);
-
 	status = notify_extensions(tracee, SIGSYS_OCC, 0, 0);
 	if (status < 0) {
 		VERBOSE(tracee, 4, "SIGSYS errored out when being handled by an extension");
@@ -431,29 +429,51 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		break;
 	}
 
-#if defined(ARCH_X86) || defined(ARCH_X86_64)
+#ifndef SYS_RECVMMSG
+#define SYS_RECVMMSG 19
+#endif
+#ifndef SYS_SENDMMSG
+#define SYS_SENDMMSG 20
+#endif
+
 	case PR_sendmmsg:
 	{
-		/* Convert direct sendmmsg syscall to socketcall.
-		 * This affects only 32-bit x86, in other archs
-		 * bionic doesn't use socketcall() for sendmmsg.  */
 		size_t arg_size = sizeof_word(tracee);
 		assert(arg_size <= sizeof(word_t));
 		byte_t args[arg_size * 4];
-		memset(args, 0, arg_size * 4);
+		memset(args, 0, sizeof(args));
 		*(word_t*)(args) = peek_reg(tracee, CURRENT, SYSARG_1);
 		*(word_t*)(args + arg_size) = peek_reg(tracee, CURRENT, SYSARG_2);
 		*(word_t*)(args + 2 * arg_size) = peek_reg(tracee, CURRENT, SYSARG_3);
 		*(word_t*)(args + 3 * arg_size) = peek_reg(tracee, CURRENT, SYSARG_4);
-		word_t tracee_args = alloc_mem(tracee, arg_size * 4);
-		write_data(tracee, tracee_args, args, arg_size * 4);
+		word_t tracee_args = alloc_mem(tracee, sizeof(args));
+		write_data(tracee, tracee_args, args, sizeof(args));
 		set_sysnum(tracee, PR_socketcall);
 		poke_reg(tracee, SYSARG_1, SYS_SENDMMSG);
 		poke_reg(tracee, SYSARG_2, tracee_args);
 		restart_syscall_after_seccomp(tracee);
 		break;
 	}
-#endif
+
+	case PR_recvmmsg:
+	{
+		size_t arg_size = sizeof_word(tracee);
+		assert(arg_size <= sizeof(word_t));
+		byte_t args[arg_size * 5];
+		memset(args, 0, sizeof(args));
+		*(word_t*)(args) = peek_reg(tracee, CURRENT, SYSARG_1);
+		*(word_t*)(args + arg_size) = peek_reg(tracee, CURRENT, SYSARG_2);
+		*(word_t*)(args + 2 * arg_size) = peek_reg(tracee, CURRENT, SYSARG_3);
+		*(word_t*)(args + 3 * arg_size) = peek_reg(tracee, CURRENT, SYSARG_4);
+		*(word_t*)(args + 4 * arg_size) = peek_reg(tracee, CURRENT, SYSARG_5);
+		word_t tracee_args = alloc_mem(tracee, sizeof(args));
+		write_data(tracee, tracee_args, args, sizeof(args));
+		set_sysnum(tracee, PR_socketcall);
+		poke_reg(tracee, SYSARG_1, SYS_RECVMMSG);
+		poke_reg(tracee, SYSARG_2, tracee_args);
+		restart_syscall_after_seccomp(tracee);
+		break;
+	}
 
 	case PR_stat:
 	case PR_lstat:
