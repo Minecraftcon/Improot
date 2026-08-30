@@ -613,26 +613,8 @@ static int handle_tracee_event_kernel_4_8(Tracee *tracee, int tracee_status)
 			bzero(&siginfo, sizeof(siginfo));
 			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
 			fetch_regs(tracee);
-			word_t pc = peek_reg(tracee, CURRENT, INSTR_POINTER);
-			note(tracee, WARNING, INTERNAL, "SIGSYS: sysnum=%d (0x%x), call_addr=%p, pc=0x%lx",
-				siginfo.si_syscall, siginfo.si_syscall, siginfo.si_call_addr, pc);
 			signal = 0;
 			poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
-#if defined(ARCH_ARM_EABI)
-			word_t cpsr = tracee->_regs[CURRENT].uregs[16];
-			bool is_thumb = (cpsr & 0x20) != 0;
-			if (pc == (word_t)siginfo.si_call_addr) {
-				poke_reg(tracee, INSTR_POINTER, pc + (is_thumb ? 2 : 4));
-			}
-#elif defined(ARCH_ARM64)
-			if (pc == (word_t)siginfo.si_call_addr) {
-				poke_reg(tracee, INSTR_POINTER, pc + 4);
-			}
-#elif defined(ARCH_X86_64) || defined(ARCH_X86)
-			if (pc == (word_t)siginfo.si_call_addr) {
-				poke_reg(tracee, INSTR_POINTER, pc + 2);
-			}
-#endif
 			push_regs(tracee);
 			tracee->restart_how = (tracee->seccomp == ENABLED ? PTRACE_CONT : PTRACE_SYSCALL);
 			break;
@@ -885,26 +867,8 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			bzero(&siginfo, sizeof(siginfo));
 			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
 			fetch_regs(tracee);
-			word_t pc = peek_reg(tracee, CURRENT, INSTR_POINTER);
-			note(tracee, WARNING, INTERNAL, "SIGSYS: sysnum=%d (0x%x), call_addr=%p, pc=0x%lx",
-				siginfo.si_syscall, siginfo.si_syscall, siginfo.si_call_addr, pc);
 			signal = 0;
 			poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
-#if defined(ARCH_ARM_EABI)
-			word_t cpsr = tracee->_regs[CURRENT].uregs[16];
-			bool is_thumb = (cpsr & 0x20) != 0;
-			if (pc == (word_t)siginfo.si_call_addr) {
-				poke_reg(tracee, INSTR_POINTER, pc + (is_thumb ? 2 : 4));
-			}
-#elif defined(ARCH_ARM64)
-			if (pc == (word_t)siginfo.si_call_addr) {
-				poke_reg(tracee, INSTR_POINTER, pc + 4);
-			}
-#elif defined(ARCH_X86_64) || defined(ARCH_X86)
-			if (pc == (word_t)siginfo.si_call_addr) {
-				poke_reg(tracee, INSTR_POINTER, pc + 2);
-			}
-#endif
 			push_regs(tracee);
 			tracee->restart_how = (tracee->seccomp == ENABLED ? PTRACE_CONT : PTRACE_SYSCALL);
 			break;
