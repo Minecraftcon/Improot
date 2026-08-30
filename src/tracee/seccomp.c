@@ -136,7 +136,7 @@ static int handle_seccomp_event_common(Tracee *tracee)
 	int status;
 	Sysnum sysnum = get_sysnum(tracee, CURRENT);
 
-	fprintf(stderr, "[improot-sigsys] pid=%d sysnum=%ld (%s)\n", tracee->pid, (long)sysnum, get_sysname(sysnum));
+	fprintf(stderr, "[improot-sigsys] pid=%d sysnum=%ld\n", tracee->pid, (long)sysnum);
 
 	status = notify_extensions(tracee, SIGSYS_OCC, 0, 0);
 	if (status < 0) {
