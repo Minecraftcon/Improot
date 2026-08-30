@@ -562,39 +562,6 @@ static bool host_blocks_af_netlink(const Tracee *tracee)
 		goto blocked;
 	}
 
-	/* socket() and bind() succeeding doesn't mean the tracee can use
-	 * the socket: LSM policies filter netlink *per message type*.
-	 * Android's SELinux grants untrusted_app "nlmsg_read" on a
-	 * netlink_route_socket but not "nlmsg_write", so every rtnetlink
-	 * message that reconfigures the network is rejected right in
-	 * sendmsg(2) with EACCES -- bubblewrap's loopback_setup() then
-	 * dies with "loopback: Failed RTM_NEWADDR: Permission denied"
-	 * although it just created and bound the socket successfully.
-	 * Probe a write too, otherwise such hosts are wrongly classified
-	 * as "AF_NETLINK works" and the tracee is left to fail later.
-	 *
-	 * The probe message can't reconfigure anything: rtnetlink has no
-	 * handler for RTM_NEWADDR in the AF_UNSPEC family (-EOPNOTSUPP)
-	 * and refuses senders without CAP_NET_ADMIN even earlier
-	 * (-EPERM).  Both of those are reported asynchronously, as a
-	 * netlink reply we never read, so only a send(2) that fails
-	 * outright means the message was denied passage to the kernel. */
-	memset(&request, 0, sizeof(request));
-	request.nlh.nlmsg_len   = NLMSG_LENGTH(sizeof(request.ifa));
-	request.nlh.nlmsg_type  = RTM_NEWADDR;
-	request.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
-	request.nlh.nlmsg_seq   = 1;
-	request.ifa.ifa_family  = AF_UNSPEC;
-
-	if (sendto(fd, &request, sizeof(request), MSG_DONTWAIT,
-		   (struct sockaddr *) &snl, sizeof(snl)) < 0
-	    && (errno == EACCES || errno == EPERM)) {
-		saved_errno = errno;
-		close(fd);
-		blocked_op = "sendto";
-		goto blocked;
-	}
-
 	close(fd);
 	cached = PROBE_ALLOWED;
 	return false;
