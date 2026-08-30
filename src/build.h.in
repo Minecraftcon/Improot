@@ -1,0 +1,11 @@
+#ifndef BUILD_H
+#define BUILD_H
+
+#undef VERSION
+#define VERSION "@VERSION@"
+
+#cmakedefine HAVE_SECCOMP_FILTER
+#cmakedefine HAVE_PROCESS_VM
+#cmakedefine HAVE_PYTHON_EXTENSION
+
+#endif /* BUILD_H */

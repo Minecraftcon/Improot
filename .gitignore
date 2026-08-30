@@ -30,5 +30,6 @@ lib/talloc/dist/lib/
 lib/talloc/.lock*
 *.lock*
 build/
+build*/
 deps/
 *.so
