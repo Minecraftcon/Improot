@@ -83,20 +83,6 @@ static Sysnum translate_sysnum(Abi abi, word_t sysnum)
 	Sysnums sysnums;
 	word_t index;
 
-#if defined(ARCH_ARM) || defined(ARCH_ARM_EABI)
-	if (sysnum >= 0xf0000 && sysnum <= 0xf0006) {
-		switch (sysnum) {
-		case 0xf0001: return PR_ARM_breakpoint;
-		case 0xf0002: return PR_ARM_cacheflush;
-		case 0xf0003: return PR_ARM_usr26;
-		case 0xf0004: return PR_ARM_usr32;
-		case 0xf0005: return PR_ARM_set_tls;
-		case 0xf0006: return PR_ARM_get_tls;
-		default: return PR_void;
-		}
-	}
-#endif
-
 	get_sysnums(abi, &sysnums);
 
 	/* Sanity checks.  */
@@ -106,7 +92,7 @@ static Sysnum translate_sysnum(Abi abi, word_t sysnum)
 	index = sysnum - sysnums.offset;
 
 	/* Sanity checks.  */
-	if (index >= sysnums.length)
+	if (index > sysnums.length)
 		return PR_void;
 
 	return sysnums.table[index];
@@ -123,18 +109,6 @@ word_t detranslate_sysnum(Abi abi, Sysnum sysnum)
 	/* Very special case.  */
 	if (sysnum == PR_void)
 		return SYSCALL_AVOIDER;
-
-#if defined(ARCH_ARM) || defined(ARCH_ARM_EABI)
-	switch (sysnum) {
-	case PR_ARM_breakpoint: return 0xf0001;
-	case PR_ARM_cacheflush: return 0xf0002;
-	case PR_ARM_usr26: return 0xf0003;
-	case PR_ARM_usr32: return 0xf0004;
-	case PR_ARM_set_tls: return 0xf0005;
-	case PR_ARM_get_tls: return 0xf0006;
-	default: break;
-	}
-#endif
 
 	get_sysnums(abi, &sysnums);
 

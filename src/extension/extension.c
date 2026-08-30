@@ -30,7 +30,6 @@
 #include "build.h"
 
 #include "compat.h"
-#include "extension/portmap/portmap.h"
 
 /**
  * Remove an @extension from its tracee's list, then send it the
@@ -160,7 +159,6 @@ void inherit_extensions(Tracee *child, Tracee *parent, word_t clone_flags)
 			/* ... with a shared config or ...  */
 			child_extension->config =
 				talloc_reference(child_extension, parent_extension->config);
-			child_extension->filtered_sysnums = parent_extension->filtered_sysnums;
 		}
 		else {
 			/* ... with another inheritance model.  */

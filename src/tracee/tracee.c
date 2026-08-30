@@ -46,11 +46,6 @@
 
 #include "compat.h"
 
-#ifndef __W_STOPCODE
-#define __W_STOPCODE(sig)	((sig) <<8 | 0x7f)
-#endif
-
-typedef LIST_HEAD(tracees, tracee) Tracees;
 static Tracees tracees;
 
 
@@ -199,6 +194,7 @@ Tracee *new_dummy_tracee(TALLOC_CTX *context)
 	 * name-space and heap.  */
 	tracee->fs = talloc_zero(tracee, FileSystemNameSpace);
 	tracee->heap = talloc_zero(tracee, Heap);
+	tracee->auxv_fd = -1;
 	if (tracee->fs == NULL || tracee->heap == NULL)
 		goto no_mem;
 
@@ -244,7 +240,7 @@ static Tracee *new_tracee(pid_t pid)
  * wait(2) manual for the meaning of @wait_options.  This function
  * returns NULL if there's no such ptracee.
  */
-Tracee *get_ptracee(const Tracee *ptracer, pid_t pid, bool only_stopped,
+static Tracee *get_ptracee(const Tracee *ptracer, pid_t pid, bool only_stopped,
 			bool only_with_pevent, word_t wait_options)
 {
 	Tracee *ptracee;
@@ -350,15 +346,15 @@ Tracee *get_tracee(const Tracee *current_tracee, pid_t pid, bool create)
  */
 void terminate_tracee(Tracee *tracee)
 {
-        tracee->terminated = true;
+	tracee->terminated = true;
 
-        /* Case where the terminated tracee is marked
-           to kill all tracees on exit.
-        */
-        if (tracee->killall_on_exit) {
-                VERBOSE(tracee, 1, "terminating all tracees on exit");
-                kill_all_tracees();
-        }
+	/* Case where the terminated tracee is marked
+	   to kill all tracees on exit.
+	*/
+	if (tracee->killall_on_exit) {
+		VERBOSE(tracee, 1, "terminating all tracees on exit");
+		kill_all_tracees();
+	}
 }
 
 /**
@@ -437,7 +433,16 @@ int new_child(Tracee *parent, word_t clone_flags)
 	child->verbose = parent->verbose;
 	child->seccomp = parent->seccomp;
 	child->sysexit_pending = parent->sysexit_pending;
-	child->restart_how = parent->restart_how;
+	child->execfn_addr = parent->execfn_addr;
+	child->auxv_fd = parent->auxv_fd;
+	child->no_new_privs = parent->no_new_privs;
+	child->seen_execve = parent->seen_execve;
+#ifdef HAS_POKEDATA_WORKAROUND
+	child->pokedata_workaround_stub_addr = parent->pokedata_workaround_stub_addr;
+#endif
+#ifdef ARCH_ARM64
+	child->is_aarch32 = parent->is_aarch32;
+#endif
 
 	/* If CLONE_VM is set, the calling process and the child
 	 * process run in the same memory space [...] any memory
@@ -459,6 +464,8 @@ int new_child(Tracee *parent, word_t clone_flags)
 		: talloc_memdup(child, parent->heap, sizeof(Heap));
 	if (child->heap == NULL)
 		return -ENOMEM;
+
+	child->load_info = talloc_reference(child, parent->load_info);
 
 	/* If CLONE_PARENT is set, then the parent of the new child
 	 * (as returned by getppid(2)) will be the same as that of the
@@ -535,13 +542,68 @@ int new_child(Tracee *parent, word_t clone_flags)
 			return -ENOMEM;
 		talloc_set_name_const(child->fs->cwd, "$cwd");
 
-		/* Bindings are shared across file-system name-spaces since a
-		 * "mount --bind" made by a process affects all other processes
-		 * under Linux.  Actually they are copied when a sub
-		 * reconfiguration occured (nested proot or chroot(2)).  */
-		child->fs->bindings.guest = talloc_reference(child->fs, parent->fs->bindings.guest);
-		child->fs->bindings.host  = talloc_reference(child->fs, parent->fs->bindings.host);
+		if (parent->clone_stripped_newns
+		    && parent->fs->bindings.guest != NULL) {
+			/* Caller asked for CLONE_NEWNS (which we
+			 * silently stripped).  Give the child its own
+			 * copy of the binding tree so emulated mount(2)
+			 * calls don't propagate back to the parent.  */
+			Binding *iter;
+
+			child->fs->bindings.guest = talloc_zero(child->fs, Bindings);
+			child->fs->bindings.host  = talloc_zero(child->fs, Bindings);
+			if (   child->fs->bindings.guest == NULL
+			    || child->fs->bindings.host  == NULL)
+				return -ENOMEM;
+			CIRCLEQ_INIT(child->fs->bindings.guest);
+			CIRCLEQ_INIT(child->fs->bindings.host);
+
+			for (iter = CIRCLEQ_FIRST(parent->fs->bindings.guest);
+			     iter != (void *) parent->fs->bindings.guest;
+			     iter = CIRCLEQ_NEXT(iter, link.guest))
+				(void) insort_binding3(child, child->fs,
+						       iter->host.path,
+						       iter->guest.path);
+		}
+		else {
+			/* Bindings are shared across file-system name-spaces since a
+			 * "mount --bind" made by a process affects all other processes
+			 * under Linux.  Actually they are copied when a sub
+			 * reconfiguration occured (nested proot or chroot(2)).  */
+			child->fs->bindings.guest = talloc_reference(child->fs, parent->fs->bindings.guest);
+			child->fs->bindings.host  = talloc_reference(child->fs, parent->fs->bindings.host);
+		}
 	}
+
+	/* Always consume the stripped-NEWNS flag once a child has been
+	 * processed, regardless of which branch above we took (the flag
+	 * could persist otherwise — e.g. when CLONE_FS sent us straight
+	 * to the shared-fs path, or when bindings.guest wasn't ready
+	 * yet — and incorrectly isolate the bindings of an unrelated
+	 * later clone in the same parent).  */
+	parent->clone_stripped_newns = false;
+
+	/* A child either enters the network namespace its parent asked
+	 * for with this very clone(2), or stays in the one the parent
+	 * already believes it lives in.  Either way it gets rtnetlink
+	 * answers for a namespace of its own (see enter.c).  */
+	child->fake_netns = parent->fake_netns || parent->clone_stripped_newnet;
+	parent->clone_stripped_newnet = false;
+
+	/* Open fds survive fork(2)/clone(2), so the child has to keep
+	 * recognising the netlink sockets its parent opened.  The reply
+	 * pending on either of them doesn't carry over: it belongs to
+	 * whoever sent the request.  */
+	for (int i = 0; i < parent->fake_netlink_fds_count; i++) {
+		child->fake_netlink_fds[i].fd = parent->fake_netlink_fds[i].fd;
+		child->fake_netlink_fds[i].reply = NULL;
+		child->fake_netlink_fds[i].reply_len = 0;
+		child->fake_netlink_fds[i].reply_off = 0;
+	}
+	child->fake_netlink_fds_count = parent->fake_netlink_fds_count;
+	memcpy(child->netlink_route_fds, parent->netlink_route_fds,
+	       sizeof(child->netlink_route_fds));
+	child->netlink_route_fds_count = parent->netlink_route_fds_count;
 
 	/* The path to the executable is unshared only once the child
 	 * process does a call to execve(2).  */
@@ -569,6 +631,9 @@ int new_child(Tracee *parent, word_t clone_flags)
 			/* Sanity check.  */
 			assert(!child->as_ptracee.tracing_started);
 
+#ifndef __W_STOPCODE
+	#define __W_STOPCODE(sig) ((sig) << 8 | 0x7f)
+#endif
 			keep_stopped = handle_ptracee_event(child, __W_STOPCODE(SIGSTOP));
 
 			/* Note that this event was already handled by
@@ -633,4 +698,8 @@ void kill_all_tracees()
 
 	LIST_FOREACH(tracee, &tracees, link)
 		kill(tracee->pid, SIGKILL);
+}
+
+Tracees *get_tracees_list_head() {
+	return &tracees;
 }

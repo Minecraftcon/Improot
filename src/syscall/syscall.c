@@ -31,6 +31,7 @@
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
 #include "tracee/mem.h"
+#include "cli/note.h"
 
 /**
  * Copy in @path a C string (PATH_MAX bytes max.) from the @tracee's
@@ -68,7 +69,7 @@ int get_sysarg_path(const Tracee *tracee, char path[PATH_MAX], Reg reg)
  * syscall points to this new block.  This function returns -errno if
  * an error occured, otherwise 0.
  */
-static int set_sysarg_data(Tracee *tracee, const void *tracer_ptr, word_t size, Reg reg)
+int set_sysarg_data(Tracee *tracee, const void *tracer_ptr, word_t size, Reg reg)
 {
 	word_t tracee_ptr;
 	int status;
@@ -119,10 +120,20 @@ bool is_voided_syscall(const Tracee *tracee, RegVersion version)
 
 /**
  * Tell whether the host kernel cancels a syscall PRoot voided instead
- * of letting the avoider it was replaced with run.
+ * of letting the avoider it was replaced with run.  A tracer that
+ * turns a syscall number negative cancels the call: the kernel neither
+ * executes it -- so the result PRoot poked at the enter stage stays
+ * untouched -- nor, on kernels which evaluate seccomp before the ptrace
+ * sysenter stop, reports that stop.  ARM's avoider is tuxcall(2),
+ * number 222, which is neither negative nor out of range: it really
+ * reaches the kernel.
  */
 static bool kernel_cancels_voided_syscall(void)
 {
+	/* A 32-bit tracee running on a 64-bit kernel needs no special
+	 * case here: the avoider reaches that kernel truncated to its
+	 * 32 least significant bits, which are read back as a negative
+	 * syscall number just the same.  */
 	return (long) SYSCALL_AVOIDER < 0;
 }
 
@@ -137,12 +148,27 @@ void translate_syscall(Tracee *tracee)
 	if (status < 0)
 		return;
 
+	int suppressed_syscall_status = 0;
+
 	if (is_enter_stage) {
 		/* Never restore original register values at the end
 		 * of this stage.  */
 		tracee->restore_original_regs = false;
+		tracee->voided_syscall_cancelled = false;
 
 		print_current_regs(tracee, 3, "sysenter start");
+
+#ifdef HAS_POKEDATA_WORKAROUND
+		/* In case of pokedata workaround has cancelled real enter
+		 * of syscall we've enqueued start of syscall again
+		 * so we won't translate it here again.  */
+		if (tracee->pokedata_workaround_relaunched_syscall) {
+			tracee->pokedata_workaround_relaunched_syscall = false;
+			tracee->status = 1;
+			tracee->restart_how = PTRACE_SYSCALL;
+			return;
+		}
+#endif
 
 		/* Translate the syscall only if it was actually
 		 * requested by the tracee, it is not a syscall
@@ -153,7 +179,9 @@ void translate_syscall(Tracee *tracee)
 			save_current_regs(tracee, MODIFIED);
 		}
 		else {
-			status = notify_extensions(tracee, SYSCALL_CHAINED_ENTER, 0, 0);
+			if (tracee->chain.sysnum_workaround_state != SYSNUM_WORKAROUND_PROCESS_REPLACED_CALL) {
+				status = notify_extensions(tracee, SYSCALL_CHAINED_ENTER, 0, 0);
+			}
 			tracee->restart_how = PTRACE_SYSCALL;
 		}
 
@@ -164,22 +192,53 @@ void translate_syscall(Tracee *tracee)
 			set_sysnum(tracee, PR_void);
 			poke_reg(tracee, SYSARG_RESULT, (word_t) status);
 			tracee->status = status;
+#if defined(ARCH_ARM_EABI)
+			tracee->restart_how = PTRACE_SYSCALL;
+#endif
 		}
 		else {
 			tracee->status = 1;
 
-			/* Ensure sysexit stage is hit for voided syscalls on platforms where
-			 * the avoider is not negative (e.g. ARM32 tuxcall 222) */
+			/* PRoot answers some syscalls itself: their number was
+			 * replaced with the avoider and their result poked
+			 * just now, at the enter stage.  Whenever that avoider
+			 * syscall reaches the host kernel, the kernel is free
+			 * to overwrite the result register -- with -ENOSYS when
+			 * it doesn't implement the number, or with the
+			 * syscall's own first argument when an outer seccomp
+			 * policy traps it, since SECCOMP_RET_TRAP rolls the
+			 * registers back to their pre-syscall values (Android
+			 * sandboxes do exactly that to the in-range number ARM
+			 * uses as the avoider).  Only translate_syscall_exit()
+			 * puts the faked result back, so make sure the exit
+			 * stage is reached; syscalls whose seccomp filter entry
+			 * already asks for it just keep what they had.  An
+			 * avoider the kernel cancels needs none of this, and
+			 * asking for a stop the kernel doesn't report there
+			 * would desynchronize the event loop.  */
 			if (is_voided_syscall(tracee, CURRENT) && !kernel_cancels_voided_syscall()) {
 				tracee->sysexit_pending = true;
 				tracee->restart_how = PTRACE_SYSCALL;
 			}
 		}
 
+#ifdef HAS_POKEDATA_WORKAROUND
+		if (tracee->pokedata_workaround_cancelled_syscall) {
+			tracee->pokedata_workaround_cancelled_syscall = false;
+			tracee->pokedata_workaround_relaunched_syscall = true;
+			tracee->restart_how = PTRACE_SYSCALL;
+			tracee->status = 0;
+			poke_reg(tracee, INSTR_POINTER, peek_reg(tracee, CURRENT, INSTR_POINTER) - SYSTRAP_SIZE);
+			push_specific_regs(tracee, false);
+			return;
+		}
+#endif
+
 		/* Restore tracee's stack pointer now if it won't hit
 		 * the sysexit stage (i.e. when seccomp is enabled and
 		 * there's nothing else to do).  */
 		if (tracee->restart_how == PTRACE_CONT) {
+			suppressed_syscall_status = tracee->status;
 			tracee->status = 0;
 			poke_reg(tracee, STACK_POINTER, peek_reg(tracee, ORIGINAL, STACK_POINTER));
 		}
@@ -189,28 +248,103 @@ void translate_syscall(Tracee *tracee)
 		 * end of this stage.  */
 		tracee->restore_original_regs = true;
 
+#ifdef HAS_POKEDATA_WORKAROUND
+		/* This is exit from syscall that was cancelled
+		 * by pokedata workaround - ignore.  */
+		if (tracee->pokedata_workaround_relaunched_syscall)
+		{
+			return;
+		}
+#endif
+
 		print_current_regs(tracee, 5, "sysexit start");
 
 		/* Translate the syscall only if it was actually
 		 * requested by the tracee, it is not a syscall
 		 * chained by PRoot.  */
-		if (tracee->chain.syscalls == NULL)
+		if (tracee->chain.syscalls == NULL || tracee->chain.sysnum_workaround_state == SYSNUM_WORKAROUND_PROCESS_REPLACED_CALL) {
+			tracee->chain.sysnum_workaround_state = SYSNUM_WORKAROUND_INACTIVE;
 			translate_syscall_exit(tracee);
+		}
+		else if (tracee->chain.sysnum_workaround_state == SYSNUM_WORKAROUND_PROCESS_FAULTY_CALL) {
+			tracee->chain.sysnum_workaround_state = SYSNUM_WORKAROUND_PROCESS_REPLACED_CALL;
+		}
 		else
 			(void) notify_extensions(tracee, SYSCALL_CHAINED_EXIT, 0, 0);
 
 		/* Reset the tracee's status. */
 		tracee->status = 0;
+#ifdef HAS_POKEDATA_WORKAROUND
+		tracee->pokedata_workaround_cancelled_syscall = false;
+#endif
 
 		/* Insert the next chained syscall, if any.  */
 		if (tracee->chain.syscalls != NULL)
 			chain_next_syscall(tracee);
 	}
 
-	(void) push_regs(tracee);
+	bool override_sysnum = is_enter_stage && tracee->chain.syscalls == NULL;
+	int push_regs_status = push_specific_regs(tracee, override_sysnum);
 
-	if (is_enter_stage)
+	/* Whether the syscall number PRoot chose is the one the tracee
+	 * is really going to enter the kernel with.  */
+	const bool sysnum_pushed = override_sysnum && push_regs_status == 0;
+
+	/* Handle inability to change syscall number */
+	if (push_regs_status < 0 && override_sysnum) {
+		word_t orig_sysnum = peek_reg(tracee, ORIGINAL, SYSARG_NUM);
+		word_t current_sysnum = peek_reg(tracee, CURRENT, SYSARG_NUM);
+		print_current_regs(tracee, 4, "pre_push");
+		if (orig_sysnum != current_sysnum) {
+			/* Restart current syscall as chained */
+			if (current_sysnum != SYSCALL_AVOIDER) {
+				restart_current_syscall_as_chained(tracee);
+			} else if (suppressed_syscall_status) {
+				/* If we've decided to fail this syscall
+				 * by setting it to no-op and continuing, but turns out
+				 * that we can't just make syscall nop, restore tracee->status
+				 * and intercept syscall exit */
+				tracee->status = suppressed_syscall_status;
+				tracee->restart_how = PTRACE_SYSCALL;
+			}
+
+			/* Set syscall arguments to make it fail
+			 * TODO: More reliable way to make invalid arguments
+			 * For most syscalls we set all args to -1
+			 * Hoping there is among them invalid request/address/fd/value that will make syscall fail */
+			poke_reg(tracee, SYSARG_1, -1);
+			poke_reg(tracee, SYSARG_2, -1);
+			poke_reg(tracee, SYSARG_3, -1);
+			poke_reg(tracee, SYSARG_4, -1);
+			poke_reg(tracee, SYSARG_5, -1);
+			poke_reg(tracee, SYSARG_6, -1);
+
+			if (get_sysnum(tracee, ORIGINAL) == PR_brk) {
+				/* For brk() we pass 0 as first arg; this is used to query value without changing it */
+				poke_reg(tracee, SYSARG_1, 0);
+			}
+
+			/* Push regs again without changing syscall */
+			push_regs_status = push_specific_regs(tracee, false);
+			if (push_regs_status != 0) {
+				note(tracee, WARNING, SYSTEM, "can't set tracee registers in workaround");
+			}
+		}
+	}
+
+	if (is_enter_stage) {
+		/* Tell the event loop that the host kernel is about to
+		 * drop this syscall on the floor, hence that it reports
+		 * no sysenter stop for it.  The avoider must have made
+		 * it to the tracee for that: when the syscall number
+		 * can't be changed, the fallback above lets the original
+		 * syscall run with invalid arguments instead.  */
+		tracee->voided_syscall_cancelled = sysnum_pushed
+						&& kernel_cancels_voided_syscall()
+						&& is_voided_syscall(tracee, CURRENT);
+
 		print_current_regs(tracee, 5, "sysenter end" );
+	}
 	else
 		print_current_regs(tracee, 4, "sysexit end");
 }

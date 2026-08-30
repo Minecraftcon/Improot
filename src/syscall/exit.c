@@ -21,10 +21,15 @@
  */
 
 #include <errno.h>       /* errno(3), E* */
+#include <stdio.h>       /* sscanf(3), */
 #include <sys/utsname.h> /* struct utsname, */
 #include <linux/net.h>   /* SYS_*, */
+#include <linux/ioctl.h> /* _IOW, */
+#include <linux/prctl.h> /* PR_GET_AUXV, */
 #include <string.h>      /* strlen(3), */
+#include <unistd.h>      /* readlink(2), */
 
+#include "cli/note.h"
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "syscall/socket.h"
@@ -36,6 +41,8 @@
 #include "tracee/reg.h"
 #include "tracee/mem.h"
 #include "tracee/abi.h"
+#include "tracee/seccomp.h"
+#include "tracee/statx.h"
 #include "path/path.h"
 #include "ptrace/ptrace.h"
 #include "ptrace/wait.h"
@@ -50,13 +57,12 @@
  */
 void translate_syscall_exit(Tracee *tracee)
 {
-	word_t syscall_number = 0;
-	word_t syscall_result = (word_t) -1;
+	word_t syscall_number;
+	word_t syscall_result;
 	int status;
 
 	status = notify_extensions(tracee, SYSCALL_EXIT_START, 0, 0);
 	if (status < 0) {
-		syscall_result = (word_t) status;
 		poke_reg(tracee, SYSARG_RESULT, (word_t) status);
 		goto end;
 	}
@@ -66,7 +72,6 @@ void translate_syscall_exit(Tracee *tracee)
 	/* Set the tracee's errno if an error occured previously during
 	 * the translation. */
 	if (tracee->status < 0) {
-		syscall_result = (word_t) tracee->status;
 		poke_reg(tracee, SYSARG_RESULT, (word_t) tracee->status);
 		goto end;
 	}
@@ -233,14 +238,22 @@ void translate_syscall_exit(Tracee *tracee)
 
 	case PR_fchdir:
 	case PR_chdir:
+	/* These syscalls are voided in enter.c; make sure the
+	 * tracee always sees a 0 return value even on kernels where
+	 * the SYSCALL_AVOIDER trick leaks -ENOSYS through.  */
+	case PR_unshare:
+	case PR_setns:
+	case PR_mount:
+	case PR_umount:
+	case PR_umount2:
+	case PR_pivot_root:
 		/* These syscalls are fully emulated, see enter.c for details
 		 * (like errors).  */
 		status = 0;
 		break;
 
 	case PR_rename:
-	case PR_renameat:
-	case PR_renameat2: {
+	case PR_renameat: {
 		char old_path[PATH_MAX];
 		char new_path[PATH_MAX];
 		ssize_t old_length;
@@ -325,6 +338,9 @@ void translate_syscall_exit(Tracee *tracee)
 		size_t max_size;
 		word_t input;
 		word_t output;
+		struct readlink_proc_fd_state proc_fd = {
+			.pid = 0, .fd = -1, .host_path = referee, .substituted = false,
+		};
 
 		/* Error reported by the kernel.  */
 		if ((int) syscall_result < 0)
@@ -368,14 +384,79 @@ void translate_syscall_exit(Tracee *tracee)
 			break;
 		}
 
+		if (status == 1) {
+			/* Empty path was passed (""),
+			 * indicating that path is pointed to by fd passed in first argument */
+			word_t dirfd = peek_reg(tracee, ORIGINAL, SYSARG_1);
+			if (syscall_number == PR_readlink || dirfd < 0) {
+				status = -EBADF;
+				break;
+			}
+			proc_fd.pid = tracee->pid;
+			proc_fd.fd  = (int) dirfd;
+			status = readlink_proc_pid_fd(tracee->pid, dirfd, referer);
+			if (status < 0)
+				break;
+		}
+		else {
+			/* Note the descriptor when the tracee read the content
+			 * of "/proc/<PID>/fd/<FD>": extensions may report it
+			 * differently than the kernel does.  Remember: "/proc"
+			 * paths were canonicalized, "self" included.  */
+			int fd_pid;
+			int fd_number;
+			char extra;
+
+			if (sscanf(referer, "/proc/%d/fd/%d%c", &fd_pid, &fd_number, &extra) == 2
+			    && fd_number >= 0) {
+				proc_fd.pid = (pid_t) fd_pid;
+				proc_fd.fd  = fd_number;
+			}
+		}
+
+		/* If the kernel filled the whole output buffer, the symlink
+		 * content was truncated to fit.  Detranslating a truncated
+		 * host path yields a wrong, wrongly-short guest path -- and
+		 * callers that only enlarge their buffer when readlink(2)
+		 * returns exactly the buffer size (bubblewrap's
+		 * readlink_malloc, glibc realpath, ...) never notice and
+		 * silently use the broken path.  Host paths are much longer
+		 * than the guest paths they map to (deep proot-distro rootfs
+		 * prefix), so short guest targets truncate easily.  Re-read
+		 * the link with a full-size buffer (referer is the translated
+		 * host path) so the detranslation below sees the real target;
+		 * readlink() simply fails for a non-symlink referer, leaving
+		 * the original content untouched.  */
+		if (old_size == max_size) {
+			ssize_t full = readlink(referer, referee, sizeof(referee) - 1);
+			if (full > 0) {
+				referee[full] = '\0';
+				old_size = (size_t) full;
+			}
+		}
+
+		/* Let extensions report another path for this descriptor;
+		 * link2symlink names the file the way the tracee opened it
+		 * instead of the way it is stored in the l2s directory.  */
+		if (proc_fd.fd >= 0) {
+			status = notify_extensions(tracee, READLINK_PROC_FD, (intptr_t) &proc_fd, 0);
+			if (status < 0)
+				break;
+		}
+
 		status = detranslate_path(tracee, referee, referer);
 		if (status < 0)
 			break;
 
 		/* The original path doesn't require any transformation, i.e
 		 * it is a symetric binding.  */
-		if (status == 0)
-			goto end;
+		if (status == 0) {
+			/* ... unless its content was substituted just above,
+			 * in which case the tracee has to be told about it.  */
+			if (!proc_fd.substituted)
+				goto end;
+			status = strlen(referee) + 1;
+		}
 
 		/* Overwrite the path.  Note: the output buffer might be
 		 * initialized with zeros but it was updated with the kernel
@@ -435,24 +516,150 @@ void translate_syscall_exit(Tracee *tracee)
 #endif
 
 	case PR_execve:
+	case PR_execveat:
 		translate_execve_exit(tracee);
 		goto end;
+
+	case PR_openat2:
+	case PR_openat:
+	case PR_open: {
+		/* Track /proc/self/auxv opens so read() results can be patched.
+		 * Needed on kernels < 6.4 where prctl(PR_GET_AUXV) is absent and
+		 * rustix falls back to reading /proc/self/auxv directly. */
+		char path_buf[sizeof("/proc/self/auxv")];
+		Reg path_reg = (syscall_number == PR_open) ? SYSARG_1 : SYSARG_2;
+
+		if ((int) syscall_result < 0)
+			goto end;
+		if (tracee->execfn_addr == 0)
+			goto end;
+		if (read_string(tracee, path_buf,
+		                peek_reg(tracee, ORIGINAL, path_reg),
+		                sizeof(path_buf)) <= 0)
+			goto end;
+		if (strcmp(path_buf, "/proc/self/auxv") != 0)
+			goto end;
+
+		tracee->auxv_fd = (int) syscall_result;
+		tracee->sysexit_pending = true;
+		tracee->restart_how = PTRACE_SYSCALL;
+		goto end;
+	}
+
+	case PR_read: {
+		/* Patch AT_EXECFN in data read from /proc/self/auxv. */
+		word_t fd, buf_addr, result, offset, entry_size, type;
+
+		if (tracee->auxv_fd < 0 || tracee->execfn_addr == 0)
+			goto end;
+
+		result = syscall_result;
+		if ((word_t) result == 0 || (ssize_t) result < 0)
+			goto end;
+
+		fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
+		if ((int) fd != tracee->auxv_fd)
+			goto end;
+
+		buf_addr   = peek_reg(tracee, ORIGINAL, SYSARG_2);
+		entry_size = 2 * sizeof_word(tracee);
+
+		for (offset = 0; offset + entry_size <= result; offset += entry_size) {
+			errno = 0;
+			type = peek_word(tracee, buf_addr + offset);
+			if (errno != 0)
+				break;
+			if (type == AT_NULL)
+				break;
+			if (type == AT_EXECFN) {
+				poke_word(tracee, buf_addr + offset + sizeof_word(tracee),
+				          tracee->execfn_addr);
+				break;
+			}
+		}
+
+		/* Stay in PTRACE_SYSCALL mode to intercept close(auxv_fd). */
+		tracee->sysexit_pending = true;
+		tracee->restart_how = PTRACE_SYSCALL;
+		goto end;
+	}
+
+	case PR_prctl: {
+#ifndef PR_GET_AUXV
+#define PR_GET_AUXV 0x41555856
+#endif
+		word_t option;
+		word_t buf_addr;
+		word_t buf_max;
+		word_t offset;
+		word_t entry_size;
+		word_t type;
+
+		option = peek_reg(tracee, ORIGINAL, SYSARG_1);
+
+		/* Record the tracee's own request for the "no new privileges"
+		 * flag so a later PR_GET_NO_NEW_PRIVS (answered at sysenter)
+		 * reports the guest's intent rather than the flag PRoot set
+		 * itself.  A successful call implies arg2 == 1, the only value
+		 * the kernel accepts.  PRoot sets the real flag in the launch
+		 * child before the initial execve (see enable_syscall_filtering),
+		 * so only count calls made once the guest program is running
+		 * (tracee->seen_execve); the flag is a one-way latch and is
+		 * never cleared, matching the kernel's fork/execve semantics. */
+		if (option == PR_SET_NO_NEW_PRIVS) {
+			if (tracee->seen_execve && (int) syscall_result == 0)
+				tracee->no_new_privs = true;
+			goto end;
+		}
+
+		/* Only intercept PR_GET_AUXV. */
+		if (option != PR_GET_AUXV)
+			goto end;
+
+		/* Error or no execfn to fix: nothing to do. */
+		if ((int) syscall_result < 0)
+			goto end;
+		if (tracee->execfn_addr == 0)
+			goto end;
+
+		/* PR_GET_AUXV returns the auxv size; if it exceeds the buffer
+		 * arg, the kernel did not write anything (buffer too small). */
+		buf_max = peek_reg(tracee, ORIGINAL, SYSARG_3);
+		if (syscall_result > buf_max)
+			goto end;
+
+		/* Scan the returned auxv buffer for AT_EXECFN and patch its
+		 * value to point to argv[0] instead of the loader temp file. */
+		buf_addr   = peek_reg(tracee, ORIGINAL, SYSARG_2);
+		entry_size = 2 * sizeof_word(tracee);
+
+		for (offset = 0; offset + entry_size <= syscall_result; offset += entry_size) {
+			errno = 0;
+			type = peek_word(tracee, buf_addr + offset);
+			if (errno != 0)
+				break;
+			if (type == AT_NULL)
+				break;
+			if (type == AT_EXECFN) {
+				poke_word(tracee, buf_addr + offset + sizeof_word(tracee),
+					  tracee->execfn_addr);
+				break;
+			}
+		}
+		goto end;
+	}
 
 	case PR_ptrace:
 		status = translate_ptrace_exit(tracee);
 		break;
 
 	case PR_wait4:
-	case PR_waitpid: {
-		bool set_result = true;
+	case PR_waitpid:
 		if (tracee->as_ptracer.waits_in != WAITS_IN_PROOT)
 			goto end;
 
-		status = translate_wait_exit(tracee, &set_result);
-		if (!set_result)
-			goto end;
+		status = translate_wait_exit(tracee);
 		break;
-	}
 
 	case PR_setrlimit:
 	case PR_prlimit64:
@@ -466,6 +673,127 @@ void translate_syscall_exit(Tracee *tracee)
 
 		/* Don't overwrite the syscall result.  */
 		goto end;
+	
+	case PR_utime:
+		if ((int) syscall_result == -ENOSYS)
+		{
+			fix_and_restart_enosys_syscall(tracee);
+		}
+		goto end;
+
+	case PR_statfs:
+	case PR_statfs64: {
+		/* Possibly fake that /dev/shm is living on tmpfs */
+		char devshm_path[PATH_MAX];
+		char statfs_path[PATH_MAX];
+
+		/* Only perform changes to result of successful syscall
+		 * (that is, path was valid, it doesn't have to point
+		 * to mount root) */
+		if (syscall_result != 0) {
+			goto end;
+		}
+
+		if (translate_path(tracee, devshm_path, AT_FDCWD, "/dev/shm", true) < 0) {
+			VERBOSE(tracee, 5, "/dev/shm is not mounted, not changing statfs() result");
+			goto end;
+		}
+
+		if (read_path(tracee, statfs_path, peek_reg(tracee, MODIFIED, SYSARG_1)) < 0) {
+			VERBOSE(tracee, 5, "statfs() exit couldn't read statfs_path");
+			goto end;
+		}
+
+		Comparison comparison = compare_paths(devshm_path, statfs_path);
+		if (comparison == PATHS_ARE_EQUAL || comparison == PATH1_IS_PREFIX) {
+			VERBOSE(tracee, 5, "Updating statfs() result to fake tmpfs /dev/shm");
+			/* Write TMPFS_MAGIC at beginning of statfs structure.
+			 *
+			 * (It's at beginning of structure regardless of syscall variant
+			 * (statfs vs statfs64) and architecture bitness
+			 * (on 64 bit this field is 8 bytes long, but as long as it's
+			 * little endian, it will need only first 4 bytes to be modified,
+			 * as next 4 bytes will always be 0))
+			 * */
+			word_t stat_addr = peek_reg(tracee, ORIGINAL, syscall_number == PR_statfs64 ? SYSARG_3 : SYSARG_2);
+			int write_status = write_data(tracee, stat_addr, "\x94\x19\x02\x01", 4);
+			if (write_status < 0) {
+				VERBOSE(tracee, 5, "Updating statfs() result failed");
+			}
+		}
+		else {
+			VERBOSE(tracee, 5, "statfs() not for /dev/shm, not changing result");
+		}
+
+		goto end;
+	}
+
+	case PR_statx:
+		status = handle_statx_syscall(tracee, false);
+		break;
+
+	case PR_ioctl:
+		if (peek_reg(tracee, ORIGINAL, SYSARG_2) == _IOW(0x94, 9, int) /* FICLONE */ &&
+				(int) peek_reg(tracee, CURRENT, SYSARG_RESULT) == -EACCES) {
+			poke_reg(tracee, SYSARG_RESULT, -EOPNOTSUPP);
+		}
+		goto end;
+
+	case PR_socket:
+		/* Record the fd we substituted for an AF_NETLINK request.  */
+		if (tracee->pending_fake_netlink_socket) {
+			int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+			if (fd >= 0) {
+				int i;
+				if (tracee->fake_netlink_fds_count < MAX_FAKE_NETLINK_FDS) {
+					/* Avoid duplicates.  */
+					bool present = false;
+					for (i = 0; i < tracee->fake_netlink_fds_count; i++) {
+						if (tracee->fake_netlink_fds[i].fd == fd) {
+							present = true;
+							break;
+						}
+					}
+					if (!present) {
+						struct fake_netlink_socket *sock =
+							&tracee->fake_netlink_fds[tracee->fake_netlink_fds_count++];
+						memset(sock, 0, sizeof(*sock));
+						sock->fd = fd;
+					}
+				}
+			}
+			tracee->pending_fake_netlink_socket = false;
+		}
+
+		/* Same for a NETLINK_ROUTE socket the host granted as is:
+		 * requests sent on it still need the ack emulation when
+		 * the tracee thinks it owns a network namespace.  */
+		if (tracee->pending_real_netlink_socket) {
+			int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+			if (fd >= 0) {
+				int i;
+				if (tracee->netlink_route_fds_count < MAX_NETLINK_ROUTE_FDS) {
+					bool present = false;
+					for (i = 0; i < tracee->netlink_route_fds_count; i++) {
+						if (tracee->netlink_route_fds[i] == fd) {
+							present = true;
+							break;
+						}
+					}
+					if (!present)
+						tracee->netlink_route_fds[tracee->netlink_route_fds_count++] = fd;
+				}
+			}
+			tracee->pending_real_netlink_socket = false;
+		}
+		goto end;
+
+	case PR_recvfrom:
+	case PR_recvmsg:
+		/* Turn the kernel's refusal to reconfigure a network
+		 * namespace the tracee doesn't really have into an ack.  */
+		handle_netlink_reply_exit(tracee, syscall_number);
+		goto end;
 
 	default:
 		goto end;
@@ -474,38 +802,6 @@ void translate_syscall_exit(Tracee *tracee)
 	poke_reg(tracee, SYSARG_RESULT, (word_t) status);
 
 end:
-	/* Invalidate path translation and negative symlink caches on successful
-	 * filesystem mutating syscalls. */
-	if ((int) syscall_result >= 0) {
-		switch (syscall_number) {
-		case PR_mkdir:
-		case PR_mkdirat:
-		case PR_rmdir:
-		case PR_unlink:
-		case PR_unlinkat:
-		case PR_rename:
-		case PR_renameat:
-		case PR_renameat2:
-		case PR_symlink:
-		case PR_symlinkat:
-		case PR_link:
-		case PR_linkat:
-		case PR_chdir:
-		case PR_fchdir:
-		case PR_pivot_root:
-		case PR_mount:
-		case PR_umount:
-		case PR_umount2:
-		case PR_mknod:
-		case PR_mknodat:
-		case PR_creat:
-			invalidate_path_caches(tracee);
-			break;
-		default:
-			break;
-		}
-	}
-
 	status = notify_extensions(tracee, SYSCALL_EXIT_END, 0, 0);
 	if (status < 0)
 		poke_reg(tracee, SYSARG_RESULT, (word_t) status);

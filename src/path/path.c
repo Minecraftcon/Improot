@@ -32,7 +32,6 @@
 #include <errno.h>     /* E*, */
 #include <stddef.h>    /* ptrdiff_t, */
 #include <inttypes.h>  /* PRI*, */
-#include <stdint.h>    /* uint32_t, UINT32_MAX */
 
 #include "path/path.h"
 #include "path/binding.h"
@@ -40,7 +39,6 @@
 #include "path/proc.h"
 #include "extension/extension.h"
 #include "cli/note.h"
-#include "jit/shm.h"
 #include "build.h"
 
 #include "compat.h"
@@ -284,7 +282,7 @@ void chop_finality(char *path)
 
 /**
  * Put in @path the result of readlink(/proc/@pid/fd/@fd).  This
- * function returns -errno if an error occured, otherwise 0.
+ * function returns -errno if an error occured, othrwise 0.
  */
 int readlink_proc_pid_fd(pid_t pid, int fd, char path[PATH_MAX])
 {
@@ -310,25 +308,6 @@ int readlink_proc_pid_fd(pid_t pid, int fd, char path[PATH_MAX])
 }
 
 /**
- * Invalidate both the path translation cache and the negative symlink
- * cache for @tracee.  Must be called on every successful write-class
- * syscall (unlink, rename, mkdir, ...) to prevent stale entries.
- */
-void invalidate_path_caches(Tracee *tracee)
-{
-	if (tracee == NULL)
-		return;
-	memset(tracee->path_cache, 0, sizeof(tracee->path_cache));
-	tracee->path_cache_tick = 0;
-	memset(tracee->nosym_cache, 0, sizeof(tracee->nosym_cache));
-	tracee->nosym_cache_next = 0;
-
-	if (global_jit_shm != NULL) {
-		jit_shm_clear(global_jit_shm);
-	}
-}
-
-/**
  * Copy in @result the equivalent of "@tracee->root + canon(@dir_fd +
  * @user_path)".  If @user_path is not absolute then it is relative to
  * the directory referred by the descriptor @dir_fd (AT_FDCWD is for
@@ -341,45 +320,6 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 {
 	char guest_path[PATH_MAX];
 	int status;
-
-	/* LRU cache probe: skip full canonicalize() if we've seen this
-	 * guest path recently.  Only cache when tracee is known (i.e.
-	 * not called at init/reconfiguration time).  */
-	if (tracee != NULL && user_path[0] != '\0') {
-		uint32_t best_tick = UINT32_MAX;
-		int      victim    = 0;
-		int      i;
-		for (i = 0; i < PATH_CACHE_SIZE; i++) {
-			struct path_cache_entry *e = &tracee->path_cache[i];
-			if (e->valid
-			 && e->dir_fd      == dir_fd
-			 && e->deref_final == deref_final
-			 && strcmp(e->guest, user_path) == 0) {
-				/* Cache hit: copy result and return. */
-				strncpy(result, e->host, PATH_MAX - 1);
-				result[PATH_MAX - 1] = '\0';
-				e->lru_tick = ++tracee->path_cache_tick;
-				VERBOSE(tracee, 3, "vpid %" PRIu64 ": path-cache hit \"%s\"",
-					tracee->vpid, user_path);
-				return 0;
-			}
-			if (e->lru_tick < best_tick) {
-				best_tick = e->lru_tick;
-				victim    = i;
-			}
-		}
-
-		/* Cache miss — run the real translation below, then fill. */
-		status = 0; /* keep compiler happy; real status set below */
-		(void) status;
-
-		/* Fall through to translation; we'll fill the cache at
-		 * the end using 'victim'.  Store user_path length for
-		 * later use in the fill step (after the skip label).  */
-		(void) victim; /* used in the fill block below */
-
-		/* The actual fill happens after the skip: label. */
-	}
 
 	/* Use "/" as the base if it is an absolute guest path. */
 	if (user_path[0] == '/') {
@@ -448,47 +388,6 @@ skip:
 	status = notify_extensions(tracee, TRANSLATED_PATH, (intptr_t) result, 0);
 	if (status < 0)
 		return status;
-
-	/* LRU cache fill: store the successful translation for reuse. */
-	if (tracee != NULL && user_path[0] != '\0') {
-		uint32_t best_tick = UINT32_MAX;
-		int      victim    = 0;
-		int      i;
-		for (i = 0; i < PATH_CACHE_SIZE; i++) {
-			struct path_cache_entry *e = &tracee->path_cache[i];
-			/* Avoid double-fill: if an entry for this exact key already
-			 * exists (race between two codepaths), just update it.  */
-			if (e->valid
-			 && e->dir_fd      == dir_fd
-			 && e->deref_final == deref_final
-			 && strcmp(e->guest, user_path) == 0) {
-				strncpy(e->host, result, PATH_MAX - 1);
-				e->host[PATH_MAX - 1] = '\0';
-				e->lru_tick = ++tracee->path_cache_tick;
-				return 0;
-			}
-			if (e->lru_tick < best_tick) {
-				best_tick = e->lru_tick;
-				victim    = i;
-			}
-		}
-		{
-			struct path_cache_entry *e = &tracee->path_cache[victim];
-			strncpy(e->guest, user_path, PATH_MAX - 1);
-			e->guest[PATH_MAX - 1] = '\0';
-			strncpy(e->host, result, PATH_MAX - 1);
-			e->host[PATH_MAX - 1] = '\0';
-			e->dir_fd      = dir_fd;
-			e->deref_final = deref_final;
-			e->valid       = true;
-			e->lru_tick    = ++tracee->path_cache_tick;
-		}
-
-		/* JIT Learner: insert the absolute guest path into SHM */
-		if (global_jit_shm != NULL && guest_path[0] == '/') {
-			jit_shm_insert(global_jit_shm, guest_path, result);
-		}
-	}
 
 	return 0;
 }
@@ -758,7 +657,6 @@ static int list_open_fd_callback(const Tracee *tracee, int fd, char path[PATH_MA
 {
 	VERBOSE(tracee, 1, "pid %d: access to \"%s\" (fd %d) won't be translated until closed",
 		tracee->pid, path, fd);
-	notify_extensions((Tracee*)tracee, ALREADY_OPENED_FD, (intptr_t)path, (intptr_t)fd);
 	return 0;
 }
 

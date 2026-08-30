@@ -28,5 +28,6 @@ uint16_t get_port(PortMap *portmap, uint16_t port_in);
 
 int add_portmap_entry(uint16_t port_in, uint16_t port_out);
 int activate_netcoop_mode();
+extern Extension *global_portmap_extension;
 
 #endif /* PORTMAP_H */

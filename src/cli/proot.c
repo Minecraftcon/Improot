@@ -30,6 +30,7 @@
 #include "extension/extension.h"
 #include "path/binding.h"
 #include "attribute.h"
+#include "extension/portmap/portmap.h"
 
 static int handle_option_vdisk(Tracee *tracee, const Cli *cli, const char *value);
 

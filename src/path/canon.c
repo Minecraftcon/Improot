@@ -35,6 +35,7 @@
 #include "path/binding.h"
 #include "path/glue.h"
 #include "path/proc.h"
+#include "path/f2fs-bug.h"
 #include "extension/extension.h"
 
 /**
@@ -129,7 +130,8 @@ static inline Finality next_component(char component[NAME_MAX], const char **cur
  * Resolve bindings (if any) in @guest_path and copy the translated
  * path into @host_path.  Also, this function checks that a non-final
  * component is either a directory (returned value is 0) or a symlink
- * (returned value is 1), otherwise it returns -errno or -ENOTDIR.
+ * (returned value is 1), otherwise it returns -errno (-ENOENT or
+ * -ENOTDIR).
  */
 static inline int substitute_binding_stat(Tracee *tracee, Finality finality, unsigned int recursion_level,
 					const char guest_path[PATH_MAX], char host_path[PATH_MAX])
@@ -148,19 +150,23 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 					IS_FINAL(finality) && recursion_level == 0);
 		if (status < 0)
 			return status;
-
-		/* Check negative symlink cache: if host_path is already known
-		 * to be a non-symlink (and valid directory if non-final), skip lstat. */
-		int i;
-		for (i = 0; i < NOSYM_CACHE_SIZE; i++) {
-			if (tracee->nosym_cache[i].valid
-			 && strcmp(tracee->nosym_cache[i].path, host_path) == 0)
-				return 0;
-		}
 	}
 
 	statl.st_mode = 0;
-	status = lstat(host_path, &statl);
+	if (should_skip_file_access_due_to_f2fs_bug(tracee, host_path)) {
+		status = -ENOENT;
+	} else {
+		status = lstat(host_path, &statl);
+		/* /linkerconfig directory is present and accessible on Android,
+		 * but cannot be stat()'d, use hardcoded stat if access was denied
+		 *
+		 * https://github.com/termux/proot/issues/254
+		 */
+		if (status < 0 && errno == EACCES && strcmp(host_path, "/linkerconfig") == 0) {
+			status = 0;
+			statl.st_mode = S_IFDIR;
+		}
+	}
 
 	/* Build the glue between the hostfs and the guestfs during
 	 * the initialization of a binding.  */
@@ -170,20 +176,12 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 			status = -1;
 	}
 
-	/* Return an error if a non-final component isn't a directory
-	 * nor a symlink.  The error depends on why the component
-	 * could not be accessed (ENOENT, EACCES, ...), otherwise the
-	 * error is "Not a directory".  */
+	/* Return an error if a non-final component isn't a
+	 * directory nor a symlink.  The error is "No such
+	 * file or directory" if this component doesn't exist,
+	 * otherwise the error is "Not a directory".  */
 	if (!IS_FINAL(finality) && !S_ISDIR(statl.st_mode) && !S_ISLNK(statl.st_mode))
-		return (status < 0 ? -errno : -ENOTDIR);
-
-	/* Record in negative symlink cache if confirmed not to be a symlink */
-	if (tracee->glue_type == 0 && status == 0 && !S_ISLNK(statl.st_mode)) {
-		int idx = tracee->nosym_cache_next++ % NOSYM_CACHE_SIZE;
-		strncpy(tracee->nosym_cache[idx].path, host_path, PATH_MAX - 1);
-		tracee->nosym_cache[idx].path[PATH_MAX - 1] = '\0';
-		tracee->nosym_cache[idx].valid = true;
-	}
+		return (status < 0 ? -ENOENT : -ENOTDIR);
 
 	return (S_ISLNK(statl.st_mode) ? 1 : 0);
 }
@@ -202,10 +200,10 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 		 char guest_path[PATH_MAX], unsigned int recursion_level)
 {
 	char scratch_path[PATH_MAX];
-	char host_path[PATH_MAX];
 	Finality finality;
 	const char *cursor;
 	int status;
+	unsigned int symlinks_followed = 0;
 
 	/* Avoid infinite loop on circular links.  */
 	if (recursion_level > MAXSYMLINKS)
@@ -228,20 +226,13 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 	else
 		strcpy(guest_path, "/");
 
-
-	/* Resolve bindings for the initial '/' component or user_path,
-	 * which is not handled in the loop below.
-	 * In particular HOST_PATH extensions are called from there.  */
-	status = substitute_binding_stat(tracee, NOT_FINAL, recursion_level, guest_path, host_path);
-	if (status < 0)
-		return status;
-
 	/* Canonicalize recursely 'user_path' into 'guest_path'.  */
 	cursor = user_path;
 	finality = NOT_FINAL;
 	while (!IS_FINAL(finality)) {
 		Comparison comparison;
 		char component[NAME_MAX];
+		char host_path[PATH_MAX];
 
 		finality = next_component(component, &cursor);
 		status = (int) finality;
@@ -291,37 +282,59 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 		/* It's a link, so we have to dereference *and*
 		 * canonicalize to ensure we are not going outside the
 		 * new root.  */
-		comparison = compare_paths("/proc", guest_path);
-		switch (comparison) {
-		case PATHS_ARE_EQUAL:
-		case PATH1_IS_PREFIX:
-			/* Some links in "/proc" are generated
-			 * dynamically by the kernel.  PRoot has to
-			 * emulate some of them.  */
-			status = readlink_proc(tracee, scratch_path,
-					       guest_path, component, comparison);
-			switch (status) {
-			case CANONICALIZE:
-				/* The symlink is already dereferenced,
-				 * now canonicalize it.  */
-				goto canon;
+		{
+			const char *proc_base = guest_path;
+			char alias_base[PATH_MAX];
 
-			case DONT_CANONICALIZE:
-				/* If and only very final, this symlink
-				 * shouldn't be dereferenced nor canonicalized.  */
-				if (finality == FINAL_NORMAL) {
-					strcpy(guest_path, scratch_path);
-					return 0;
+			comparison = compare_paths("/proc", guest_path);
+
+			/* If guest_path is not under /proc directly,
+			 * check whether it aliases /proc via a binding
+			 * (e.g. /oldroot/proc when /oldroot is bound to
+			 * /).  Otherwise links like /oldroot/proc/self
+			 * would be resolved by the real kernel readlink
+			 * and return PRoot's own pid.  */
+			if (comparison != PATHS_ARE_EQUAL && comparison != PATH1_IS_PREFIX) {
+				strncpy(alias_base, guest_path, PATH_MAX - 1);
+				alias_base[PATH_MAX - 1] = '\0';
+				(void) substitute_binding(tracee, GUEST, alias_base);
+				if (strcmp(alias_base, guest_path) != 0) {
+					comparison = compare_paths("/proc", alias_base);
+					proc_base = alias_base;
 				}
-				break;
-
-			default:
-				if (status < 0)
-					return status;
 			}
 
-		default:
-			break;
+			switch (comparison) {
+			case PATHS_ARE_EQUAL:
+			case PATH1_IS_PREFIX:
+				/* Some links in "/proc" are generated
+				 * dynamically by the kernel.  PRoot has to
+				 * emulate some of them.  */
+				status = readlink_proc(tracee, scratch_path,
+						       proc_base, component, comparison);
+				switch (status) {
+				case CANONICALIZE:
+					/* The symlink is already dereferenced,
+					 * now canonicalize it.  */
+					goto canon;
+
+				case DONT_CANONICALIZE:
+					/* If and only very final, this symlink
+					 * shouldn't be dereferenced nor canonicalized.  */
+					if (finality == FINAL_NORMAL) {
+						strcpy(guest_path, scratch_path);
+						return 0;
+					}
+					break;
+
+				default:
+					if (status < 0)
+						return status;
+				}
+
+			default:
+				break;
+			}
 		}
 
 		status = readlink(host_path, scratch_path, sizeof(scratch_path));
@@ -342,7 +355,7 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 		 * is/contains a link, moreover if it is not an
 		 * absolute link then it is relative to
 		 * 'guest_path'. */
-		status = canonicalize(tracee, scratch_path, true, guest_path, recursion_level + 1);
+		status = canonicalize(tracee, scratch_path, true, guest_path, recursion_level + (++symlinks_followed));
 		if (status < 0)
 			return status;
 
