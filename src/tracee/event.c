@@ -37,6 +37,8 @@
 #include <inttypes.h>   /* PRI*, */
 #include <linux/version.h> /* KERNEL_VERSION, */
 
+#include "tracee/mem.h"
+#include "tracee/reg.h"
 #include "tracee/event.h"
 #include "cli/note.h"
 #include "path/path.h"
