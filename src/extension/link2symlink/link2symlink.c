@@ -523,7 +523,7 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 	/* Check if it is a symbolic link to an existing l2s file.  */
 	if (S_ISLNK(statl.st_mode)) {
 		size = my_readlink(original, intermediate);
-		if (size > 0) {
+		if (size == 0) {
 			name = strrchr(intermediate, '/');
 			if (name == NULL)
 				name = intermediate;
@@ -531,7 +531,7 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 				name++;
 
 			if (strncmp(name, PREFIX, strlen(PREFIX)) == 0) {
-				if (my_readlink(intermediate, final) >= 0)
+				if (my_readlink(intermediate, final) == 0)
 					first_link = 0;
 			}
 		}
