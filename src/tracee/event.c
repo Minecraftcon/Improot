@@ -87,16 +87,11 @@ int launch_process(Tracee *tracee, char *const argv[])
 		 * does the same thing. */
 		kill(getpid(), SIGSTOP);
 
-		/* Set LD_PRELOAD only inside the child tracee process */
+		/* Set LD_PRELOAD cleanly for the guest without host Termux pollution */
 		if (getenv("IMPROOT_JIT_FD") != NULL) {
-			const char *old_preload = getenv("LD_PRELOAD");
-			if (old_preload && strlen(old_preload) > 0) {
-				char new_preload[PATH_MAX];
-				snprintf(new_preload, sizeof(new_preload), "/.proot.jit.so:%s", old_preload);
-				setenv("LD_PRELOAD", new_preload, 1);
-			} else {
-				setenv("LD_PRELOAD", "/.proot.jit.so", 1);
-			}
+			setenv("LD_PRELOAD", "/.proot.jit.so", 1);
+		} else {
+			unsetenv("LD_PRELOAD");
 		}
 
 		/* Improve performance by using seccomp mode 2, unless
@@ -613,6 +608,17 @@ static int handle_tracee_event_kernel_4_8(Tracee *tracee, int tracee_status)
 			}
 			break;
 
+		case SIGSYS:
+			/* Trap Android OS / host kernel seccomp filter violations
+			 * (e.g. statx, clone3, faccessat2, rseq unsupported by host kernel)
+			 * and return -ENOSYS gracefully to let the guest fallback. */
+			signal = 0;
+			fetch_regs(tracee);
+			poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
+			push_regs(tracee);
+			tracee->restart_how = (tracee->seccomp == ENABLED ? PTRACE_CONT : PTRACE_SYSCALL);
+			break;
+
 		default:
 			/* Deliver this signal as-is.  */
 			break;
@@ -840,6 +846,17 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 				tracee->sigstop = SIGSTOP_ALLOWED;
 				signal = 0;
 			}
+			break;
+
+		case SIGSYS:
+			/* Trap Android OS / host kernel seccomp filter violations
+			 * (e.g. statx, clone3, faccessat2, rseq unsupported by host kernel)
+			 * and return -ENOSYS gracefully to let the guest fallback. */
+			signal = 0;
+			fetch_regs(tracee);
+			poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
+			push_regs(tracee);
+			tracee->restart_how = (tracee->seccomp == ENABLED ? PTRACE_CONT : PTRACE_SYSCALL);
 			break;
 
 		default:
