@@ -620,7 +620,14 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 	status = symlink(intermediate, target_path);
 	if (status < 0) {
 		status = -errno;
-		decrement_link_count(tracee, sysarg);
+		VERBOSE(tracee, 1, "link2symlink: symlink(\"%s\", \"%s\") failed: %s", intermediate, target_path, strerror(-status));
+		if (first_link) {
+			unlink(original);
+			l2s_rename(final, original);
+			l2s_unlink(intermediate);
+		} else {
+			decrement_link_count(tracee, sysarg);
+		}
 		return status;
 	}
 	poke_reg(tracee, SYSARG_RESULT, 0);
