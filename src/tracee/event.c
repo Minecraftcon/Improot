@@ -625,11 +625,30 @@ static int handle_tracee_event_kernel_4_8(Tracee *tracee, int tracee_status)
 			bzero(&siginfo, sizeof(siginfo));
 			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
 			fetch_regs(tracee);
+#if defined(ARCH_ARM_EABI)
+			word_t lr = tracee->_regs[CURRENT].uregs[14];
+			word_t sp = tracee->_regs[CURRENT].uregs[13];
+			word_t pc = tracee->_regs[CURRENT].uregs[15];
+			word_t r0 = tracee->_regs[CURRENT].uregs[0];
+			word_t r1 = tracee->_regs[CURRENT].uregs[1];
+			word_t r2 = tracee->_regs[CURRENT].uregs[2];
+			word_t r3 = tracee->_regs[CURRENT].uregs[3];
+			word_t r7 = tracee->_regs[CURRENT].uregs[7];
+			word_t stack[8] = {0};
+			(void) read_data(tracee, stack, sp, sizeof(stack));
+			note(tracee, ERROR, INTERNAL, "SIGSEGV at %p (code %d), pc=0x%lx, lr=0x%lx, sp=0x%lx",
+				siginfo.si_addr, siginfo.si_code, pc, lr, sp);
+			note(tracee, ERROR, INTERNAL, "regs: r0=0x%lx, r1=0x%lx, r2=0x%lx, r3=0x%lx, r7=0x%lx",
+				r0, r1, r2, r3, r7);
+			note(tracee, ERROR, INTERNAL, "stack: [0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx]",
+				stack[0], stack[1], stack[2], stack[3], stack[4], stack[5], stack[6], stack[7]);
+#else
 			note(tracee, ERROR, INTERNAL, "SIGSEGV at %p (code %d), pc=0x%lx, sp=0x%lx, r0=0x%lx",
 				siginfo.si_addr, siginfo.si_code,
 				peek_reg(tracee, CURRENT, INSTR_POINTER),
 				peek_reg(tracee, CURRENT, STACK_POINTER),
 				peek_reg(tracee, CURRENT, SYSARG_1));
+#endif
 			break;
 		}
 
