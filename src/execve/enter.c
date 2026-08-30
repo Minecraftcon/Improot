@@ -79,7 +79,7 @@ static int add_mapping(const Tracee *tracee UNUSED, LoadInfo *load_info,
 		return -ENOMEM;
 
 	start_address = P(vaddr) & page_mask;
-	end_address   = (P(vaddr) + P(filesz) + page_size) & page_mask;
+	end_address   = (P(vaddr) + P(filesz) + page_size - 1) & page_mask;
 
 	load_info->mappings[index].fd     = -1; /* Unknown yet.  */
 	load_info->mappings[index].offset = P(offset) & page_mask;
@@ -96,11 +96,11 @@ static int add_mapping(const Tracee *tracee UNUSED, LoadInfo *load_info,
 	 * -- man 7 elf.  */
 	if (P(memsz) > P(filesz)) {
 		/* How many extra bytes in the current page?  */
-		load_info->mappings[index].clear_length = end_address - P(vaddr) - P(filesz);
+		load_info->mappings[index].clear_length = end_address - (P(vaddr) + P(filesz));
 
 		/* Create new pages for the remaining extra bytes.  */
 		start_address = end_address;
-		end_address   = (P(vaddr) + P(memsz) + page_size) & page_mask;
+		end_address   = (P(vaddr) + P(memsz) + page_size - 1) & page_mask;
 		if (end_address > start_address) {
 			index++;
 			load_info->mappings = talloc_realloc(load_info, load_info->mappings,
