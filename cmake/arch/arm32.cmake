@@ -3,7 +3,7 @@
 message(STATUS "Configuring for ARM32 (ARMv7l)")
 
 set(LOADER_ADDR "0x20000000")
-set(LOADER_ARCH_FLAGS "-mthumb")
+set(LOADER_ARCH_FLAGS "-marm")
 set(ARCH_HAS_32BIT OFF)
 
 add_compile_definitions(
