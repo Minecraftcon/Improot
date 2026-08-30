@@ -520,24 +520,26 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 	if (S_ISDIR(statl.st_mode))
 		return -EPERM;
 
-	/* Check if it is a symbolic link.  */
+	/* Check if it is a symbolic link to an existing l2s file.  */
 	if (S_ISLNK(statl.st_mode)) {
-		/* get name */
 		size = my_readlink(original, intermediate);
-		if (size < 0)
-			return size;
+		if (size > 0) {
+			name = strrchr(intermediate, '/');
+			if (name == NULL)
+				name = intermediate;
+			else
+				name++;
 
-		name = strrchr(intermediate, '/');
-		if (name == NULL)
-			name = intermediate;
-		else
-			name++;
+			if (strncmp(name, PREFIX, strlen(PREFIX)) == 0) {
+				if (my_readlink(intermediate, final) >= 0)
+					first_link = 0;
+			}
+		}
+	}
 
-		if (strncmp(name, PREFIX, strlen(PREFIX)) == 0)
-			first_link = 0;
-	} else {
+	if (first_link) {
 		/* compute new name */
-		name = strrchr(original,'/');
+		name = strrchr(original, '/');
 		if (name == NULL)
 			name = original;
 		else
@@ -545,20 +547,10 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 
 		if (get_l2s_directory()) {
 			/* "<l2s>/<PREFIX><name>" plus the four digits of the
-			 * suffix and the ".0002" of the final file.  The
-			 * bound used to be computed from the *directory* of
-			 * @original, which says nothing about the length of
-			 * the name appended here: a short directory and a
-			 * long name passed it and then overran these
-			 * buffers.  */
+			 * suffix and the ".0002" of the final file.  */
 			if (l2s_directory_length + strlen(PREFIX) + strlen(name) + 11 >= PATH_MAX)
 				return -ENAMETOOLONG;
 
-			/* Ask for the descriptor here, so a directory that
-			 * can't be opened is reported with the reason it
-			 * can't -- ENOTDIR for the symbolic link a tracee
-			 * left under that name -- instead of surfacing as
-			 * whichever of the operations below fails first.  */
 			status = open_l2s_directory();
 			if (status < 0)
 				return status;
@@ -574,9 +566,7 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 		}
 		strcat(intermediate, PREFIX);
 		strcat(intermediate, name);
-	}
 
-	if (first_link) {
 		/*Move the original content to the new path. */
 		do {
 			sprintf(new_intermediate, "%s%04d", intermediate, intermediate_suffix);
@@ -604,10 +594,6 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 			return status;
 	} else {
 		/*Move the original content to new location, by incrementing count at end of path. */
-		size = my_readlink(intermediate, final);
-		if (size < 0)
-			return size;
-
 		link_count = atoi(final + strlen(final) - 4);
 		link_count++;
 
