@@ -648,7 +648,7 @@ int translate_execve_enter(Tracee *tracee)
 	else
 		tracee->new_exe = NULL;
 
-	tracee->skip_proot_loader = false;
+	tracee->skip_proot_loader = (getenv("PROOT_LOADER") == NULL && getenv("PROOT_USE_LOADER") == NULL);
 	if (tracee->qemu != NULL) {
 		status = expand_runner(tracee, host_path, user_path);
 		if (status < 0)
