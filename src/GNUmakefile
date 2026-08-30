@@ -79,6 +79,27 @@ OBJECTS += \
 	extension/extension.o	\
 	extension/kompat/kompat.o \
 	extension/fake_id0/fake_id0.o \
+	extension/fake_id0/chmod.o \
+	extension/fake_id0/access.o \
+	extension/fake_id0/socket.o \
+	extension/fake_id0/chown.o \
+	extension/fake_id0/sendmsg.o \
+	extension/fake_id0/helper_functions.o \
+	extension/fake_id0/getsockopt.o \
+	extension/fake_id0/rename.o \
+	extension/fake_id0/link.o \
+	extension/fake_id0/stat.o \
+	extension/fake_id0/mk.o \
+	extension/fake_id0/utimensat.o \
+	extension/fake_id0/open.o \
+	extension/fake_id0/symlink.o \
+	extension/fake_id0/chroot.o \
+	extension/fake_id0/unlink.o \
+	extension/fake_id0/exec.o \
+	path/f2fs-bug.o \
+	syscall/pipe_shadow.o \
+	tracee/statx.o \
+	tracee/seccomp.o \
 	extension/link2symlink/link2symlink.o \
 	extension/vdisk/vdisk.o \
 	extension/portmap/portmap.o \

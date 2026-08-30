@@ -817,17 +817,80 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 #endif /* ifndef USERLAND */
 
 	case PR_setgroups:
-	case PR_setgroups32:
+	case PR_setgroups32: {
+		int size = (int) peek_reg(tracee, ORIGINAL, SYSARG_1);
+		word_t list_addr = peek_reg(tracee, ORIGINAL, SYSARG_2);
+		bool is_16bit = (get_sysnum(tracee, ORIGINAL) == PR_setgroups) && (get_abi(tracee) == ABI_2 || (!is_32on64_mode(tracee) && sizeof(word_t) == 4));
+
+		if (config->egid != 0 && !config->caps_active) {
+			poke_reg(tracee, SYSARG_RESULT, -EPERM);
+			set_sysnum(tracee, PR_void);
+			return 0;
+		}
+
+		if (size < 0 || size > 64) {
+			poke_reg(tracee, SYSARG_RESULT, -EINVAL);
+			set_sysnum(tracee, PR_void);
+			return 0;
+		}
+
+		config->ngroups = size;
+		for (int i = 0; i < size; i++) {
+			if (is_16bit) {
+				uint16_t g16 = peek_uint16(tracee, list_addr + i * sizeof(uint16_t));
+				config->groups[i] = (g16 == (uint16_t)-1) ? (gid_t)-1 : (gid_t)g16;
+			} else {
+				config->groups[i] = (gid_t) peek_uint32(tracee, list_addr + i * sizeof(uint32_t));
+			}
+		}
+
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		set_sysnum(tracee, PR_void);
+		return 0;
+	}
+
 	case PR_getgroups:
-	case PR_getgroups32:
-		/* TODO */
-#ifdef USERLAND
-	/* TODO: need to actually emulate these */
-	//On Android, the system is returning gids that our rootfs knows nothing about
-	//which is generating errors
-	set_sysnum(tracee, PR_void);
-	return 0;
-#endif
+	case PR_getgroups32: {
+		int size = (int) peek_reg(tracee, ORIGINAL, SYSARG_1);
+		word_t list_addr = peek_reg(tracee, ORIGINAL, SYSARG_2);
+		bool is_16bit = (get_sysnum(tracee, ORIGINAL) == PR_getgroups) && (get_abi(tracee) == ABI_2 || (!is_32on64_mode(tracee) && sizeof(word_t) == 4));
+		int count = config->ngroups;
+
+		if (count == 0 && config->egid == 0) {
+			count = 1;
+			config->groups[0] = 0;
+			config->ngroups = 1;
+		}
+
+		if (size == 0) {
+			poke_reg(tracee, SYSARG_RESULT, count);
+			set_sysnum(tracee, PR_void);
+			return 0;
+		}
+
+		if (size < count) {
+			poke_reg(tracee, SYSARG_RESULT, -EINVAL);
+			set_sysnum(tracee, PR_void);
+			return 0;
+		}
+
+		for (int i = 0; i < count; i++) {
+			if (is_16bit) {
+				poke_uint16(tracee, list_addr + i * sizeof(uint16_t), (uint16_t) config->groups[i]);
+			} else {
+				poke_uint32(tracee, list_addr + i * sizeof(uint32_t), (uint32_t) config->groups[i]);
+			}
+			if (errno != 0) {
+				poke_reg(tracee, SYSARG_RESULT, -errno);
+				set_sysnum(tracee, PR_void);
+				return 0;
+			}
+		}
+
+		poke_reg(tracee, SYSARG_RESULT, count);
+		set_sysnum(tracee, PR_void);
+		return 0;
+	}
 
 	default:
 		return 0;
@@ -1007,22 +1070,10 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		poke_reg(tracee, SYSARG_RESULT, config->umask);
 		config->umask = (mode_t) peek_reg(tracee, MODIFIED, SYSARG_1); 
 		return 0;
-
-	case PR_setgroups:
-	case PR_setgroups32:
-	case PR_getgroups:
-	case PR_getgroups32:
-		/*TODO: need to really emulate*/
-		poke_reg(tracee, SYSARG_RESULT, 0);
-		return 0;
 #endif
 
 	case PR_setdomainname:
 	case PR_sethostname:
-#ifndef USERLAND
-	case PR_setgroups:
-	case PR_setgroups32:
-#endif
 	case PR_mknod:
 	case PR_mknodat:
 	case PR_capset:
@@ -1241,6 +1292,11 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		config->fsgid = gid;
 		config->caps_active = (uid == 0);
 		config->keep_caps = false;
+		config->ngroups = 0;
+		if (gid == 0) {
+			config->ngroups = 1;
+			config->groups[0] = 0;
+		}
 			/* Set the umask to the typical linux value. */
 			config->umask = 022;
 

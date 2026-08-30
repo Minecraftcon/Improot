@@ -114,11 +114,11 @@ add_custom_command(
     COMMAND ${CMAKE_C_COMPILER}
         -I${CMAKE_CURRENT_SOURCE_DIR}/src
         -D_GNU_SOURCE
-        -fno-pic -fno-PIE -ffreestanding -fno-stack-protector -fno-builtin ${LOADER_ARCH_FLAGS}
+        -fPIC -ffreestanding -fno-stack-protector -fno-builtin ${LOADER_ARCH_FLAGS}
         ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/loader.c
         ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/assembly.S
-        -static -nostdlib -Wl,-no-pie
-        -Wl,--build-id=none,--image-base=${LOADER_ADDR},-Ttext=${LOADER_ADDR},-N,-z,noexecstack
+        -static -nostdlib
+        -Wl,--build-id=none,-Ttext=${LOADER_ADDR},-z,noexecstack
         -o ${CMAKE_CURRENT_BINARY_DIR}/loader.elf
     COMMAND ${STRIP_EXECUTABLE} -s ${CMAKE_CURRENT_BINARY_DIR}/loader.elf || true
     DEPENDS

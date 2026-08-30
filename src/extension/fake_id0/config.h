@@ -15,6 +15,9 @@ typedef struct {
 	gid_t sgid;
 	gid_t fsgid;
 
+	int ngroups;
+	gid_t groups[64];
+
 	mode_t umask;
 
 	/* Whether the process effectively holds CAP_SETUID/CAP_SETGID under

@@ -343,6 +343,10 @@ static int handle_option_P(Tracee *tracee, const Cli *cli UNUSED, const char *va
 
 static int handle_option_l(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
 {
+	static bool l2s_init = false;
+	if (l2s_init)
+		return 0;
+	l2s_init = true;
 	return initialize_extension(tracee, link2symlink_callback, NULL);
 }
 
