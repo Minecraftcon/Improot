@@ -74,10 +74,20 @@ configure_file(
     @ONLY
 )
 
-# Strip program detection
+# Strip, NM, and AWK program detection
 find_program(STRIP_EXECUTABLE NAMES llvm-strip strip)
 if(NOT STRIP_EXECUTABLE)
     set(STRIP_EXECUTABLE "strip")
+endif()
+
+find_program(NM_EXECUTABLE NAMES llvm-nm nm)
+if(NOT NM_EXECUTABLE)
+    set(NM_EXECUTABLE "nm")
+endif()
+
+find_program(AWK_EXECUTABLE NAMES gawk awk nawk mawk)
+if(NOT AWK_EXECUTABLE)
+    set(AWK_EXECUTABLE "awk")
 endif()
 
 # Dependencies: libvdisk
@@ -110,7 +120,7 @@ endif()
 # Freestanding Loader Build & Packaging
 # ----------------------------------------------------------------------
 add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/loader.elf
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/loader.elf ${CMAKE_CURRENT_BINARY_DIR}/loader-info.c
     COMMAND ${CMAKE_C_COMPILER}
         -I${CMAKE_CURRENT_SOURCE_DIR}/src
         -D_GNU_SOURCE
@@ -120,11 +130,14 @@ add_custom_command(
         -static -nostdlib
         -Wl,--build-id=none,-Ttext=${LOADER_ADDR},-z,noexecstack
         -o ${CMAKE_CURRENT_BINARY_DIR}/loader.elf
+    COMMAND ${CMAKE_COMMAND} -E echo "Generating loader-info.c from loader.elf..."
+    COMMAND ${NM_EXECUTABLE} -n ${CMAKE_CURRENT_BINARY_DIR}/loader.elf | ${AWK_EXECUTABLE} -f ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/loader-info.awk > ${CMAKE_CURRENT_BINARY_DIR}/loader-info.c || ${CMAKE_COMMAND} -E echo "const ssize_t offset_to_pokedata_workaround = 0;" > ${CMAKE_CURRENT_BINARY_DIR}/loader-info.c
     COMMAND ${STRIP_EXECUTABLE} -s ${CMAKE_CURRENT_BINARY_DIR}/loader.elf || true
     DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/loader.c
         ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/assembly.S
-    COMMENT "Compiling freestanding loader.elf"
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/loader-info.awk
+    COMMENT "Compiling freestanding loader.elf and generating loader-info.c"
 )
 
 add_custom_command(
@@ -276,6 +289,7 @@ set(IMPROOT_SOURCES
     src/extension/vdisk/vdisk.c
     src/extension/portmap/portmap.c
     src/extension/portmap/map.c
+    ${CMAKE_CURRENT_BINARY_DIR}/loader-info.c
     ${LOADER_WRAPPED_SOURCES}
 )
 
