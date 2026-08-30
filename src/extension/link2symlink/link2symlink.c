@@ -225,13 +225,12 @@ static int l2s_access(const char *path)
 {
 	const char *name;
 	int dir_fd;
+	struct stat st;
 
 	if (l2s_entry(path, &dir_fd, &name) < 0)
 		return -1;
 
-	/* No AT_SYMLINK_NOFOLLOW: access(2) follows, and a dangling
-	 * intermediate has always counted as a free slot here.  */
-	return (dir_fd < 0) ? access(path, F_OK) : faccessat(dir_fd, name, F_OK, 0);
+	return (dir_fd < 0) ? lstat(path, &st) : fstatat(dir_fd, name, &st, AT_SYMLINK_NOFOLLOW);
 }
 
 static int l2s_symlink(const char *target, const char *path)
@@ -241,6 +240,12 @@ static int l2s_symlink(const char *target, const char *path)
 
 	if (l2s_entry(path, &dir_fd, &name) < 0)
 		return -1;
+
+	/* If entry already exists, remove it first to avoid EEXIST */
+	if (dir_fd < 0)
+		unlink(path);
+	else
+		unlinkat(dir_fd, name, 0);
 
 	return (dir_fd < 0) ? symlink(target, path) : symlinkat(target, dir_fd, name);
 }
@@ -570,12 +575,11 @@ static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sys
 		/*Move the original content to the new path. */
 		do {
 			sprintf(new_intermediate, "%s%04d", intermediate, intermediate_suffix);
+			sprintf(final, "%s.0002", new_intermediate);
 			intermediate_suffix++;
-		} while ((l2s_access(new_intermediate) != -1) && (intermediate_suffix < 1000));
+		} while (((l2s_access(new_intermediate) != -1) || (l2s_access(final) != -1)) && (intermediate_suffix < 10000));
 		strcpy(intermediate, new_intermediate);
 
-		strcpy(final, intermediate);
-		strcat(final, ".0002");
 		status = l2s_rename(original, final);
 		if (status < 0)
 			return status;
