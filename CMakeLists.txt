@@ -4,20 +4,12 @@ project(improot C ASM)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-include(CheckCSourceCompiles)
-include(CheckIncludeFiles)
 include(GNUInstallDirs)
 
 # Options
 option(BUILD_LIBVDISK "Build bundled libvdisk" ON)
 option(BUILD_CARE "Build CARE utility" OFF)
 option(ENABLE_PYTHON "Enable Python extension" OFF)
-
-# Common compiler definitions
-add_compile_definitions(
-    _GNU_SOURCE
-    _FILE_OFFSET_BITS=64
-)
 
 # Common compiler flags
 add_compile_options(
@@ -49,26 +41,31 @@ if(NOT GIT_COMMIT)
 endif()
 set(VERSION "${GIT_VERSION}-${GIT_COMMIT}")
 
-# Feature checks
-check_c_source_compiles("
-#include <sys/prctl.h>
-#include <linux/seccomp.h>
-#include <linux/filter.h>
-int main() {
-    struct sock_filter filter[] = { BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW) };
-    struct sock_fprog prog = { 1, filter };
-    return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
-}
-" HAVE_SECCOMP_FILTER)
+# ----------------------------------------------------------------------
+# Modular Includes: Feature Checks, OS, and Architecture
+# ----------------------------------------------------------------------
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/feature_checks.cmake)
 
-check_c_source_compiles("
-#define _GNU_SOURCE
-#include <sys/uio.h>
-int main() {
-    struct iovec local = {0}, remote = {0};
-    return (int)process_vm_readv(0, &local, 1, &remote, 1, 0);
-}
-" HAVE_PROCESS_VM)
+# OS-Specific Dispatch
+if(ANDROID OR CMAKE_SYSTEM_NAME MATCHES "Android" OR EXISTS "/data/data/com.termux")
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/os/android.cmake)
+else()
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/os/linux.cmake)
+endif()
+
+# Architecture-Specific Dispatch
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/arch/aarch64.cmake)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm|armv7|armv7l|armv8l")
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/arch/arm32.cmake)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/arch/x86_64.cmake)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "i.86|x86")
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/arch/x86.cmake)
+else()
+    message(WARNING "Unknown processor ${CMAKE_SYSTEM_PROCESSOR}, defaulting to arm32 settings")
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/arch/arm32.cmake)
+endif()
 
 # Configure build.h
 configure_file(
@@ -76,48 +73,6 @@ configure_file(
     ${CMAKE_CURRENT_BINARY_DIR}/build.h
     @ONLY
 )
-
-# Dependencies: ZLIB
-find_package(ZLIB REQUIRED)
-
-# Dependencies: talloc
-find_package(PkgConfig QUIET)
-set(TALLOC_FOUND FALSE)
-
-if(PKG_CONFIG_FOUND)
-    pkg_check_modules(PKG_TALLOC talloc)
-    if(PKG_TALLOC_FOUND)
-        set(TALLOC_FOUND TRUE)
-        set(TALLOC_LIBRARIES ${PKG_TALLOC_LIBRARIES})
-        set(TALLOC_INCLUDE_DIRS ${PKG_TALLOC_INCLUDE_DIRS})
-    endif()
-endif()
-
-if(NOT TALLOC_FOUND)
-    # Check bundled dist or source
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/lib/talloc/dist/lib/libtalloc.so")
-        set(TALLOC_FOUND TRUE)
-        add_library(talloc SHARED IMPORTED)
-        set_target_properties(talloc PROPERTIES
-            IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/lib/talloc/dist/lib/libtalloc.so"
-            INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/lib/talloc/dist/include"
-        )
-        set(TALLOC_LIBRARIES talloc)
-        set(TALLOC_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/lib/talloc/dist/include")
-    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/lib/talloc/talloc.c")
-        # Build talloc from bundled source
-        add_library(talloc STATIC "${CMAKE_CURRENT_SOURCE_DIR}/lib/talloc/talloc.c")
-        target_include_directories(talloc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/lib/talloc")
-        target_compile_definitions(talloc PRIVATE _GNU_SOURCE _FILE_OFFSET_BITS=64)
-        set(TALLOC_FOUND TRUE)
-        set(TALLOC_LIBRARIES talloc)
-        set(TALLOC_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/lib/talloc")
-    else()
-        # Fallback to standard linker library
-        set(TALLOC_LIBRARIES talloc)
-        set(TALLOC_INCLUDE_DIRS "")
-    endif()
-endif()
 
 # Strip program detection
 find_program(STRIP_EXECUTABLE NAMES llvm-strip strip)
@@ -152,31 +107,8 @@ if(BUILD_LIBVDISK AND NOT TARGET vdisk)
 endif()
 
 # ----------------------------------------------------------------------
-# Freestanding Loader configuration
+# Freestanding Loader Build & Packaging
 # ----------------------------------------------------------------------
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    set(LOADER_ADDR "0x600000000000")
-    set(LOADER_ARCH_FLAGS "")
-    set(ARCH_HAS_32BIT ON)
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-    set(LOADER_ADDR "0x2000000000")
-    set(LOADER_ARCH_FLAGS "")
-    set(ARCH_HAS_32BIT OFF)
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm|armv7|armv7l|armv8l")
-    set(LOADER_ADDR "0x10000000")
-    set(LOADER_ARCH_FLAGS "-marm")
-    set(ARCH_HAS_32BIT OFF)
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "i.86|x86")
-    set(LOADER_ADDR "0xa0000000")
-    set(LOADER_ARCH_FLAGS "-mregparm=3")
-    set(ARCH_HAS_32BIT OFF)
-else()
-    set(LOADER_ADDR "0x10000000")
-    set(LOADER_ARCH_FLAGS "")
-    set(ARCH_HAS_32BIT OFF)
-endif()
-
-# Build primary loader.elf
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/loader.elf
     COMMAND ${CMAKE_C_COMPILER}
@@ -195,7 +127,6 @@ add_custom_command(
     COMMENT "Compiling freestanding loader.elf"
 )
 
-# Generate loader_wrapped.S
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/loader_wrapped.S
     COMMAND ${CMAKE_COMMAND} -E echo ".global _binary_loader_elf_start" > ${CMAKE_CURRENT_BINARY_DIR}/loader_wrapped.S
@@ -210,9 +141,8 @@ add_custom_command(
 
 set(LOADER_WRAPPED_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/loader_wrapped.S)
 
-# Optional 32-bit loader for x86_64
+# Optional 32-bit companion loader for 64-bit platforms
 if(ARCH_HAS_32BIT)
-    # Check if -m32 works
     execute_process(
         COMMAND ${CMAKE_C_COMPILER} -m32 -E -x c /dev/null
         RESULT_VARIABLE M32_CHECK_RES
@@ -336,8 +266,8 @@ target_include_directories(proot PRIVATE
 target_link_libraries(proot PRIVATE
     vdisk
     ${TALLOC_LIBRARIES}
-    ZLIB::ZLIB
-    ${CMAKE_DL_LIBS}
+    ${ZLIB_LIBRARIES}
+    ${OS_EXTRA_LIBS}
 )
 
 # Optional CARE utility
@@ -367,8 +297,8 @@ if(BUILD_CARE)
         vdisk
         ${TALLOC_LIBRARIES}
         ${LIBARCHIVE_LIBRARIES}
-        ZLIB::ZLIB
-        ${CMAKE_DL_LIBS}
+        ${ZLIB_LIBRARIES}
+        ${OS_EXTRA_LIBS}
     )
 endif()
 

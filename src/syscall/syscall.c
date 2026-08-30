@@ -99,6 +99,33 @@ int set_sysarg_path(Tracee *tracee, const char path[PATH_MAX], Reg reg)
 	return set_sysarg_data(tracee, path, strlen(path) + 1, reg);
 }
 
+/**
+ * Tell whether the syscall number the @tracee holds in @version is the
+ * avoider, ie. whether PRoot replaced the syscall the tracee asked for
+ * with a no-op in order to answer it itself.
+ */
+bool is_voided_syscall(const Tracee *tracee, RegVersion version)
+{
+	word_t avoider = SYSCALL_AVOIDER;
+
+#if defined(ARCH_ARM64) || defined(ARCH_X86_64)
+	if (is_32on64_mode(tracee))
+		avoider &= 0xFFFFFFFF;
+#endif
+
+	return peek_reg(tracee, version, SYSARG_NUM) == avoider
+	    && peek_reg(tracee, ORIGINAL, SYSARG_NUM) != avoider;
+}
+
+/**
+ * Tell whether the host kernel cancels a syscall PRoot voided instead
+ * of letting the avoider it was replaced with run.
+ */
+static bool kernel_cancels_voided_syscall(void)
+{
+	return (long) SYSCALL_AVOIDER < 0;
+}
+
 void translate_syscall(Tracee *tracee)
 {
 	const bool is_enter_stage = IS_IN_SYSENTER(tracee);
@@ -138,8 +165,16 @@ void translate_syscall(Tracee *tracee)
 			poke_reg(tracee, SYSARG_RESULT, (word_t) status);
 			tracee->status = status;
 		}
-		else
+		else {
 			tracee->status = 1;
+
+			/* Ensure sysexit stage is hit for voided syscalls on platforms where
+			 * the avoider is not negative (e.g. ARM32 tuxcall 222) */
+			if (is_voided_syscall(tracee, CURRENT) && !kernel_cancels_voided_syscall()) {
+				tracee->sysexit_pending = true;
+				tracee->restart_how = PTRACE_SYSCALL;
+			}
+		}
 
 		/* Restore tracee's stack pointer now if it won't hit
 		 * the sysexit stage (i.e. when seccomp is enabled and
