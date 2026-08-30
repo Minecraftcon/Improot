@@ -635,6 +635,32 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 		}
 		return 0;
 
+	case PR_clock_gettime64:
+	case PR_clock_settime64:
+	case PR_clock_adjtime64:
+	case PR_clock_getres_time64:
+	case PR_clock_nanosleep_time64:
+	case PR_timer_gettime64:
+	case PR_timer_settime64:
+	case PR_timerfd_gettime64:
+	case PR_timerfd_settime64:
+	case PR_utimensat_time64:
+	case PR_pselect6_time64:
+	case PR_ppoll_time64:
+	case PR_io_pgetevents_time64:
+	case PR_recvmmsg_time64:
+	case PR_mq_timedsend_time64:
+	case PR_mq_timedreceive_time64:
+	case PR_semtimedop_time64:
+	case PR_rt_sigtimedwait_time64:
+	case PR_futex_time64:
+	case PR_sched_rr_get_interval_time64:
+		if (needs_kompat(config, KERNEL_VERSION(5,1,0))) {
+			set_sysnum(tracee, SYSCALL_AVOIDER);
+			tracee->status = -ENOSYS;
+		}
+		return 0;
+
 	case PR_epoll_pwait2:
 		if (needs_kompat(config, KERNEL_VERSION(5,11,0))) {
 			set_sysnum(tracee, SYSCALL_AVOIDER);
@@ -1062,6 +1088,26 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_faccessat2, 	0 },
 	{ PR_close_range, 	0 },
 	{ PR_openat2, 		0 },
+	{ PR_clock_gettime64, 	0 },
+	{ PR_clock_settime64, 	0 },
+	{ PR_clock_adjtime64, 	0 },
+	{ PR_clock_getres_time64, 0 },
+	{ PR_clock_nanosleep_time64, 0 },
+	{ PR_timer_gettime64, 	0 },
+	{ PR_timer_settime64, 	0 },
+	{ PR_timerfd_gettime64, 0 },
+	{ PR_timerfd_settime64, 0 },
+	{ PR_utimensat_time64, 	0 },
+	{ PR_pselect6_time64, 	0 },
+	{ PR_ppoll_time64, 	0 },
+	{ PR_io_pgetevents_time64, 0 },
+	{ PR_recvmmsg_time64, 	0 },
+	{ PR_mq_timedsend_time64, 0 },
+	{ PR_mq_timedreceive_time64, 0 },
+	{ PR_semtimedop_time64, 0 },
+	{ PR_rt_sigtimedwait_time64, 0 },
+	{ PR_futex_time64, 	0 },
+	{ PR_sched_rr_get_interval_time64, 0 },
 	{ PR_epoll_pwait2, 	0 },
 	FILTERED_SYSNUM_END,
 };

@@ -617,6 +617,20 @@ static int handle_tracee_event_kernel_4_8(Tracee *tracee, int tracee_status)
 			fetch_regs(tracee);
 			signal = 0;
 			poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
+#if defined(ARCH_ARM_EABI) || defined(ARCH_ARM)
+			word_t pc = peek_reg(tracee, CURRENT, INSTR_POINTER);
+			word_t cpsr = peek_reg(tracee, CURRENT, STATE_FLAGS);
+			if (cpsr & 0x20)
+				poke_reg(tracee, INSTR_POINTER, pc + 2); /* Thumb svc is 2 bytes */
+			else
+				poke_reg(tracee, INSTR_POINTER, pc + 4); /* ARM svc is 4 bytes */
+#elif defined(ARCH_X86_64) || defined(ARCH_X86)
+			word_t pc = peek_reg(tracee, CURRENT, INSTR_POINTER);
+			poke_reg(tracee, INSTR_POINTER, pc + 2);
+#elif defined(ARCH_ARM64)
+			word_t pc = peek_reg(tracee, CURRENT, INSTR_POINTER);
+			poke_reg(tracee, INSTR_POINTER, pc + 4);
+#endif
 			push_regs(tracee);
 			tracee->restart_how = (tracee->seccomp == ENABLED ? PTRACE_CONT : PTRACE_SYSCALL);
 			break;
@@ -890,6 +904,20 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			fetch_regs(tracee);
 			signal = 0;
 			poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
+#if defined(ARCH_ARM_EABI) || defined(ARCH_ARM)
+			word_t pc = peek_reg(tracee, CURRENT, INSTR_POINTER);
+			word_t cpsr = peek_reg(tracee, CURRENT, STATE_FLAGS);
+			if (cpsr & 0x20)
+				poke_reg(tracee, INSTR_POINTER, pc + 2); /* Thumb svc is 2 bytes */
+			else
+				poke_reg(tracee, INSTR_POINTER, pc + 4); /* ARM svc is 4 bytes */
+#elif defined(ARCH_X86_64) || defined(ARCH_X86)
+			word_t pc = peek_reg(tracee, CURRENT, INSTR_POINTER);
+			poke_reg(tracee, INSTR_POINTER, pc + 2);
+#elif defined(ARCH_ARM64)
+			word_t pc = peek_reg(tracee, CURRENT, INSTR_POINTER);
+			poke_reg(tracee, INSTR_POINTER, pc + 4);
+#endif
 			push_regs(tracee);
 			tracee->restart_how = (tracee->seccomp == ENABLED ? PTRACE_CONT : PTRACE_SYSCALL);
 			break;
