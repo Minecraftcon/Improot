@@ -345,6 +345,11 @@ static int handle_option_l(Tracee *tracee, const Cli *cli UNUSED, const char *va
 	return initialize_extension(tracee, link2symlink_callback, NULL);
 }
 
+static int handle_option_sysvipc(Tracee *tracee UNUSED, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	return 0;
+}
+
 static int handle_option_vdisk(Tracee *tracee, const Cli *cli UNUSED, const char *value)
 {
 	int status = initialize_extension(tracee, vdisk_callback, value);

@@ -24,6 +24,7 @@ static int handle_option_P(Tracee *tracee, const Cli *cli, const char *value);
 #endif
 static int handle_option_0(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_l(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_sysvipc(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_R(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_S(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_kill_on_exit(Tracee *tracee, const Cli *cli, const char *value);
@@ -275,11 +276,20 @@ Based on PRoot (GPL v2 or later). Includes libvdisk userspace storage layer.",
 	{ .class = "Execution & Emulation Options",
 	  .arguments = {
 		{ .name = "-l", .separator = '\0', .value = NULL },
+		{ .name = "-L", .separator = '\0', .value = NULL },
 		{ .name = "--link2symlink", .separator = '\0', .value = NULL },
 		{ .name = NULL, .separator = '\0', .value = NULL } },
 	  .handler = handle_option_l,
 	  .description = "Emulate hardlinks as symlinks for environments without hardlink support.",
 	  .detail = "\tTranslates link() system calls to symlink() for restricted host storage.",
+	},
+	{ .class = "Execution & Emulation Options",
+	  .arguments = {
+		{ .name = "--sysvipc", .separator = '\0', .value = NULL },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_sysvipc,
+	  .description = "Emulate System V IPC (shm, sem, msg) for compatibility.",
+	  .detail = "\tEnables IPC emulation for containers requiring SysV IPC.",
 	},
 	{ .class = "Execution & Emulation Options",
 	  .arguments = {
