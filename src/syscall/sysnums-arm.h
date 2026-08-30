@@ -340,6 +340,11 @@ static const Sysnum sysnums_arm[] = {
 	[ 381 ] = PR_sched_getattr,
 	[ 382 ] = PR_renameat2,
 	[ 397 ] = PR_statx,
+	[ 398 ] = PR_rseq,
 	[ 412 ] = PR_utimensat_time64,
-        [ 435 ] = PR_clone3,
+	[ 435 ] = PR_clone3,
+	[ 436 ] = PR_close_range,
+	[ 437 ] = PR_openat2,
+	[ 439 ] = PR_faccessat2,
+	[ 441 ] = PR_epoll_pwait2,
 };
