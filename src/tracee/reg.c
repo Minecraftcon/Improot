@@ -98,6 +98,9 @@
 
 #elif defined(ARCH_ARM_EABI)
 
+    #undef  USER_REGS_OFFSET
+    #define USER_REGS_OFFSET(reg_name) offsetof(struct user_regs_struct, reg_name)
+
     static off_t reg_offset[] = {
 	[SYSARG_NUM]    = USER_REGS_OFFSET(uregs[7]),
 	[SYSARG_1]      = USER_REGS_OFFSET(uregs[0]),

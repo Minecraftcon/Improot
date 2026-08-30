@@ -86,7 +86,7 @@ case "${TARGET_ARCH}" in
         AR="${AR:-llvm-ar}"
         RANLIB="${RANLIB:-llvm-ranlib}"
         STRIP="${STRIP:-llvm-strip}"
-        CFLAGS="-O3 -Wall -Wextra -D_GNU_SOURCE ${CFLAGS}"
+        CFLAGS="-O3 -Wall -Wextra -D_GNU_SOURCE -fno-stack-protector ${CFLAGS}"
         ;;
 
     *)
