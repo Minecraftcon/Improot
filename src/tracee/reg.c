@@ -345,3 +345,21 @@ int push_regs(Tracee *tracee)
 
 	return 0;
 }
+
+word_t get_systrap_size(Tracee *tracee)
+{
+#if defined(ARCH_ARM_EABI)
+	/* On ARM Thumb mode (T bit in CPSR is bit 5), svc instruction is 2 bytes */
+	if (peek_reg(tracee, CURRENT, STATE_FLAGS) & (1 << 5))
+		return 2;
+	return 4;
+#elif defined(ARCH_ARM64)
+	if (is_32on64_mode(tracee) && (peek_reg(tracee, CURRENT, STATE_FLAGS) & (1 << 5)))
+		return 2;
+	return 4;
+#elif defined(ARCH_X86) || defined(ARCH_X86_64)
+	return 2;
+#else
+	return SYSTRAP_SIZE;
+#endif
+}

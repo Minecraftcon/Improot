@@ -9,4 +9,5 @@ set(ARCH_HAS_32BIT OFF)
 add_compile_definitions(
     ARCH_ARM_EABI
     _ARM_
+    HAS_POKEDATA_WORKAROUND
 )
