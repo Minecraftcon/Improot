@@ -10,7 +10,10 @@ add_compile_definitions(
 
 # Termux default temp directory and ashmem support
 if(EXISTS "/data/data/com.termux" OR DEFINED ENV{TERMUX_VERSION})
-    add_compile_definitions(PROOT_DEFAULT_TMP_DIR="/data/data/com.termux/files/usr/tmp")
+    add_compile_definitions(
+        PROOT_DEFAULT_TMP_DIR="/data/data/com.termux/files/usr/tmp"
+        PROOT_UNBUNDLE_LOADER="/data/data/com.termux/files/usr/libexec/proot"
+    )
 endif()
 
 # Check for Android shared memory (libandroid-shmem)
