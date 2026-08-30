@@ -60,6 +60,8 @@ void set_result_after_seccomp(Tracee *tracee, word_t result) {
 	VERBOSE(tracee, 3, "Setting result after SIGSYS to 0x%lx", result);
 	poke_reg(tracee, SYSARG_RESULT, result);
 	push_specific_regs(tracee, false);
+	tracee->status = 0;
+	tracee->restart_how = PTRACE_SYSCALL;
 }
 
 /**
