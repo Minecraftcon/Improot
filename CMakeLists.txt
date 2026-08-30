@@ -118,7 +118,7 @@ add_custom_command(
         ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/loader.c
         ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/assembly.S
         -static -nostdlib
-        -Wl,--build-id=none,-Ttext=${LOADER_ADDR},-z,noexecstack
+        -Wl,--build-id=none,--image-base=${LOADER_ADDR},-Ttext=${LOADER_ADDR},-N,-z,noexecstack
         -o ${CMAKE_CURRENT_BINARY_DIR}/loader.elf
     COMMAND ${STRIP_EXECUTABLE} -s ${CMAKE_CURRENT_BINARY_DIR}/loader.elf || true
     DEPENDS
@@ -160,7 +160,7 @@ if(ARCH_HAS_32BIT)
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/loader.c
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/assembly.S
                 -static -nostdlib
-                -Wl,--build-id=none,-Ttext=0xa0000000,-z,noexecstack
+                -Wl,--build-id=none,--image-base=0xa0000000,-Ttext=0xa0000000,-N,-z,noexecstack
                 -o ${CMAKE_CURRENT_BINARY_DIR}/loader-m32.elf
             COMMAND ${STRIP_EXECUTABLE} -s ${CMAKE_CURRENT_BINARY_DIR}/loader-m32.elf || true
             DEPENDS
