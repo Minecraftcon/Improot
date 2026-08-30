@@ -384,6 +384,7 @@ static int transfer_load_script(Tracee *tracee)
 	 * current register values will be used as-is at the end.  */
 	save_current_regs(tracee, ORIGINAL);
 	tracee->_regs_were_changed = true;
+	tracee->restore_original_regs = false;
 
 	return 0;
 }
@@ -433,6 +434,7 @@ void translate_execve_exit(Tracee *tracee)
 		/* Restore registers to their current values.  */
 		save_current_regs(tracee, ORIGINAL);
 		tracee->_regs_were_changed = true;
+		tracee->restore_original_regs = false;
 
 		/* This is is required to make GDB work correctly
 		 * under PRoot, however it deserves to be used
