@@ -1127,10 +1127,10 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 	case INITIALIZATION: {
 		/* List of syscalls handled by this extensions.  */
 		static FilteredSysnum filtered_sysnums[] = {
-			{ PR_link,		FILTER_SYSEXIT },
-			{ PR_linkat,		FILTER_SYSEXIT },
-			{ PR_unlink,		FILTER_SYSEXIT },
-			{ PR_unlinkat,		FILTER_SYSEXIT },
+			{ PR_link,		0 },
+			{ PR_linkat,		0 },
+			{ PR_unlink,		0 },
+			{ PR_unlinkat,		0 },
 			{ PR_fstat,		FILTER_SYSEXIT },
 			{ PR_fstat64,		FILTER_SYSEXIT },
 			{ PR_fstatat64,		FILTER_SYSEXIT },
@@ -1139,9 +1139,9 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 			{ PR_newfstatat,	FILTER_SYSEXIT },
 			{ PR_stat,		FILTER_SYSEXIT },
 			{ PR_stat64,		FILTER_SYSEXIT },
-			{ PR_rename,		FILTER_SYSEXIT },
-			{ PR_renameat,		FILTER_SYSEXIT },
-			{ PR_renameat2,		FILTER_SYSEXIT },
+			{ PR_rename,		0 },
+			{ PR_renameat,		0 },
+			{ PR_renameat2,		0 },
 			FILTERED_SYSNUM_END,
 		};
 		extension->filtered_sysnums = filtered_sysnums;
