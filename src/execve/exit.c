@@ -413,10 +413,22 @@ void translate_execve_exit(Tracee *tracee)
 		 * - the rtld_fini pointer
 		 * - the state flags
 		 */
+		word_t entry = peek_reg(tracee, ORIGINAL, SYSARG_3);
 		poke_reg(tracee, STACK_POINTER, peek_reg(tracee, ORIGINAL, SYSARG_2));
-		poke_reg(tracee, INSTR_POINTER, peek_reg(tracee, ORIGINAL, SYSARG_3));
+		poke_reg(tracee, INSTR_POINTER, entry);
 		poke_reg(tracee, RTLD_FINI, 0);
+#if defined(ARCH_ARM_EABI)
+		word_t cpsr = peek_reg(tracee, CURRENT, STATE_FLAGS);
+		if (entry & 1) {
+			cpsr |= 0x20; /* Enable Thumb mode in CPSR */
+			poke_reg(tracee, INSTR_POINTER, entry & ~1UL);
+		} else {
+			cpsr &= ~0x20; /* Clear Thumb mode in CPSR */
+		}
+		poke_reg(tracee, STATE_FLAGS, cpsr);
+#else
 		poke_reg(tracee, STATE_FLAGS, 0);
+#endif
 
 		/* Restore registers to their current values.  */
 		save_current_regs(tracee, ORIGINAL);
