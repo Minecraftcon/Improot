@@ -28,17 +28,14 @@
  * - the rtld_fini pointer (r0)
  */
 #define BRANCH(stack_pointer, destination) do {			\
+	register word_t _sp asm("r1") = (word_t)(stack_pointer);	\
+	register word_t _dest asm("r2") = (word_t)(destination);	\
 	asm volatile (						\
-		"// Restore initial stack pointer.	\n\t"	\
 		"mov sp, %0				\n\t"	\
-		"					\n\t"	\
-		"// Clear rtld_fini.			\n\t"	\
 		"mov r0, #0				\n\t"	\
-		"					\n\t"	\
-		"// Start the program.			\n\t"	\
-		"bx %1					\n"	\
+		"bx %1					\n\t"	\
 		: /* no output */				\
-		: "r" (stack_pointer), "r" (destination)	\
+		: "r" (_sp), "r" (_dest)			\
 		: "memory", "r0");				\
 	__builtin_unreachable();				\
 	} while (0)
