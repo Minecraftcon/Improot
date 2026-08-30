@@ -119,6 +119,12 @@ if(NOT TALLOC_FOUND)
     endif()
 endif()
 
+# Strip program detection
+find_program(STRIP_EXECUTABLE NAMES llvm-strip strip)
+if(NOT STRIP_EXECUTABLE)
+    set(STRIP_EXECUTABLE "strip")
+endif()
+
 # Dependencies: libvdisk
 if(BUILD_LIBVDISK AND NOT TARGET vdisk)
     set(LIBVDISK_DIR "")
@@ -128,6 +134,16 @@ if(BUILD_LIBVDISK AND NOT TARGET vdisk)
         set(LIBVDISK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/libvdisk")
     elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libvdisk/CMakeLists.txt")
         set(LIBVDISK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libvdisk")
+    else()
+        message(STATUS "Auto-cloning libvdisk from https://github.com/Minecraftcon/libvdisk.git...")
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/deps")
+        execute_process(
+            COMMAND git clone https://github.com/Minecraftcon/libvdisk.git "${CMAKE_CURRENT_SOURCE_DIR}/deps/libvdisk"
+            RESULT_VARIABLE GIT_CLONE_RES
+        )
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/libvdisk/CMakeLists.txt")
+            set(LIBVDISK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/libvdisk")
+        endif()
     endif()
 
     if(LIBVDISK_DIR)
@@ -172,7 +188,7 @@ add_custom_command(
         -static -nostdlib
         -Wl,--build-id=none,-Ttext=${LOADER_ADDR},-z,noexecstack
         -o ${CMAKE_CURRENT_BINARY_DIR}/loader.elf
-    COMMAND ${CMAKE_STRIP} -s ${CMAKE_CURRENT_BINARY_DIR}/loader.elf || true
+    COMMAND ${STRIP_EXECUTABLE} -s ${CMAKE_CURRENT_BINARY_DIR}/loader.elf || true
     DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/loader.c
         ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/assembly.S
@@ -216,7 +232,7 @@ if(ARCH_HAS_32BIT)
                 -static -nostdlib
                 -Wl,--build-id=none,-Ttext=0xa0000000,-z,noexecstack
                 -o ${CMAKE_CURRENT_BINARY_DIR}/loader-m32.elf
-            COMMAND ${CMAKE_STRIP} -s ${CMAKE_CURRENT_BINARY_DIR}/loader-m32.elf || true
+            COMMAND ${STRIP_EXECUTABLE} -s ${CMAKE_CURRENT_BINARY_DIR}/loader-m32.elf || true
             DEPENDS
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/loader.c
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/loader/assembly.S
@@ -311,6 +327,9 @@ target_include_directories(proot PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/uthash/src
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/uthash/include
+    ${LIBVDISK_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/libvdisk/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../libvdisk/include
     ${TALLOC_INCLUDE_DIRS}
 )
 
